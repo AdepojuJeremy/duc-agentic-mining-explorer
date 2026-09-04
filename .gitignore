@@ -1,1 +1,13 @@
-placeholder
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.env
+runs/
+data/index/
+data/raw/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+.DS_Store
