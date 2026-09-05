@@ -8,6 +8,7 @@ from .llm import OpenAIRoleClient
 from .models import (
     Candidate,
     CandidateValidation,
+    ConstructionContract,
     GroundingGate,
     ProposalReview,
     VignetteProposal,
@@ -20,6 +21,7 @@ from .source_policy import assess_source_pair
 async def review_proposal(
     candidate: Candidate,
     validation: CandidateValidation,
+    contract: ConstructionContract,
     proposal: VignetteProposal,
     corpus: CorpusStore,
     client: OpenAIRoleClient,
@@ -30,7 +32,7 @@ async def review_proposal(
     if not baseline or not modifier:
         raise ValueError("proposal references missing source")
 
-    static = static_vignette_checks(candidate, validation, proposal)
+    static = static_vignette_checks(candidate, contract, proposal)
     source_policy = assess_source_pair(
         baseline,
         modifier,
@@ -40,6 +42,7 @@ async def review_proposal(
     payload = {
         "candidate": candidate.model_dump(mode="json"),
         "validation": validation.model_dump(mode="json"),
+        "construction_contract": contract.model_dump(mode="json"),
         "proposal": proposal.model_dump(mode="json"),
         "baseline_source": baseline.model_dump(mode="json"),
         "modifier_source": modifier.model_dump(mode="json"),
@@ -76,17 +79,28 @@ async def review_proposal(
             passed=False,
             rationale="deterministic source/provenance check failed",
         )
-    if not bool(static["affected_components_present"]):
-        value.affected_components_consistent = GroundingGate(
-            passed=False,
-            rationale="affected decision components are missing",
-        )
-    if not bool(static["domain_locked"]):
+    if not bool(static["contract_locked"]):
         value.same_decision_preserved = GroundingGate(
             passed=False,
-            rationale="proposal changed the validator-normalized decision domain",
+            rationale="proposal changed one or more immutable construction-contract fields",
+        )
+        value.affected_components_consistent = GroundingGate(
+            passed=False,
+            rationale="proposal did not preserve locked affected decision components",
         )
         value.needs_candidate_revalidation = True
+
+    constructed_premises = [
+        premise
+        for premise in proposal.scenario_premises
+        if premise.status == "constructed_requires_review"
+    ]
+    if constructed_premises and not contract.allowed_scenario_premises:
+        value.scenario_premises_authorized = GroundingGate(
+            passed=False,
+            rationale="proposal introduced constructed scenario premises but the contract allows none",
+        )
+
     if not source_policy.passed:
         value.source_policy_consistent = GroundingGate(
             passed=False,
@@ -99,6 +113,7 @@ async def review_proposal(
         value.same_decision_preserved,
         value.stage_separation,
         value.no_unsupported_patient_facts,
+        value.scenario_premises_authorized,
         value.no_answer_cues,
         value.nonduplicative_stage2,
         value.recommendation_grounding,
