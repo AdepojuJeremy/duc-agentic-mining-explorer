@@ -11,6 +11,7 @@ from .corpus import CorpusStore
 from .llm import OpenAIRoleClient
 from .models import Candidate, DecisionDomain, FormalArm, RunMetrics, ToolEvent, stable_id
 from .prompts import EXPLORER_SYSTEM
+from .source_registry import recommendation_authorities_for_domain
 
 
 def _span_is_grounded(span: str, source_text: str) -> bool:
@@ -254,9 +255,18 @@ async def explore_round(
         if target_domain and target_arm
         else "TARGET_CELL: none; discover any valid formal DUC route.\n"
     )
+    authority_text = ""
+    if target_domain:
+        authorities = recommendation_authorities_for_domain(target_domain)
+        authority_text = (
+            "DOMAIN_AUTHORITY_HINTS: "
+            + ", ".join(authorities)
+            + "\nUse these only when relevant records are present in the local corpus; clinical topic fit and document-level authority override organization-level preference.\n"
+        )
     prompt = (
         f"ROUND_ID: {round_id}\n"
         f"{target_text}"
+        f"{authority_text}"
         f"ANCHOR_SOURCE:\n{json.dumps(anchor.model_dump(mode='json'), ensure_ascii=False)}\n\n"
         "Explore for one or more clinically stageable evidence routes starting from this anchor. "
         "When recording a route, copy the exact baseline and modifier evidence spans from the opened records."
