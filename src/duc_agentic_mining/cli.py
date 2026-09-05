@@ -11,6 +11,7 @@ from .acquisition import load_source_config, source_status, sync_sources
 from .config import load_config
 from .corpus import build_index
 from .derived_metrics import enrich_metrics_file, record_human_review
+from .nice_public import annotate_nice_status, apply_nice_public_fallback
 from .pipeline import AgenticMiningPipeline
 
 app = typer.Typer(no_args_is_help=True, help="DUC comprehensive agentic source-mining explorer")
@@ -106,7 +107,8 @@ def record_human_review_counts(
 def sources_status(config: Path) -> None:
     """Show configured source jobs, local snapshots, and credential availability."""
     cfg = load_source_config(config)
-    console.print(json.dumps(source_status(cfg), indent=2))
+    rows = annotate_nice_status(cfg, source_status(cfg))
+    console.print(json.dumps(rows, indent=2))
 
 
 @sources_app.command("sync")
@@ -124,7 +126,9 @@ def sources_sync(
     unknown = sorted(set(only) - set(cfg.sources))
     if unknown:
         raise typer.BadParameter(f"unknown source jobs: {unknown}")
-    result = sync_sources(cfg, only=set(only) or None, force=force)
+    selected = set(only) or None
+    result = sync_sources(cfg, only=selected, force=force)
+    result = apply_nice_public_fallback(cfg, result, only=selected)
     console.print(json.dumps(result, indent=2))
 
 

@@ -7,7 +7,7 @@ The DUC miner does not treat GitHub as a clinical data store. Raw source snapsho
 | Job kind | Intended source | Access |
 |---|---|---|
 | `meditron` | EPFL/Meditron Guidelines Collection | public Hugging Face bulk download; `HF_TOKEN` optional |
-| `nice` | NICE Guidance Data Service | licensed NICE Syndication API; `NICE_API_KEY` required |
+| `nice` | NICE guidance | licensed NICE Syndication API when `NICE_API_KEY` is available; otherwise controlled public NICE guidance retrieval seeded from Meditron guidance IDs |
 | `who` | WHO publications | official WHO REST publication endpoint |
 | `cdc` | CDC guidance/content | official CDC Content Services v2 API plus `/content` retrieval |
 | `ncbi` | PubMed / PMC | NCBI E-utilities; `NCBI_API_KEY` optional but recommended; set `NCBI_EMAIL` |
@@ -22,14 +22,14 @@ Keep all credentials in environment variables. Do not put them in YAML or commit
 
 ```bash
 export OPENAI_API_KEY='...'
-export NICE_API_KEY='...'
+export NICE_API_KEY='...'       # optional for the pipeline; required only for NICE Syndication API access
 export NCBI_API_KEY='...'       # optional, recommended
 export NCBI_EMAIL='you@example.org'
 export OPENFDA_API_KEY='...'    # optional at low volume, recommended for scale
 export HF_TOKEN='...'           # optional for the public Meditron dataset
 ```
 
-Only `NICE_API_KEY` is marked as required by the default acquisition configuration. Missing optional credentials reduce rate limits but do not stop the whole sync. Missing required credentials produce `credential_missing` for that source job while other jobs continue.
+The default NICE job is configured as a licensed API job, so `credential_required` remains true for that API path. The CLI now handles the absence of `NICE_API_KEY` by automatically invoking the public NICE fallback rather than dropping NICE from the corpus. Missing optional credentials for other sources reduce rate limits but do not stop the whole sync.
 
 ## Check readiness
 
@@ -38,6 +38,21 @@ duc-agentic sources status config/sources.yaml
 ```
 
 This reports each configured job, whether it is enabled, whether its output exists, and whether the configured credential environment variable is present.
+
+For NICE, status also reports:
+
+```text
+access_strategy: licensed_api
+```
+
+when `NICE_API_KEY` exists, or:
+
+```text
+access_strategy: public_web_fallback_from_meditron
+api_key_optional_for_pipeline: true
+```
+
+when the key is absent. `public_fallback_available` becomes true after the Meditron seed has been downloaded.
 
 ## Download the Meditron seed
 
@@ -50,6 +65,8 @@ The default URL is the public `epfl-llm/guidelines` `open_guidelines.jsonl` snap
 ```bash
 duc-agentic sources download-meditron config/sources.yaml --force
 ```
+
+Meditron is important even when primary APIs are available because it provides broad discovery coverage. For the NICE fallback specifically, it supplies candidate NICE guidance identifiers; the fallback then retrieves the corresponding current public pages from `nice.org.uk` rather than treating Meditron text as the refreshed source.
 
 ## Sync official sources
 
@@ -70,6 +87,8 @@ duc-agentic sources sync config/sources.yaml \
   --only pmc \
   --only openfda
 ```
+
+When `--only nice` is used without a NICE API key, the Meditron seed must already exist. If it does not, the NICE result reports `fallback_seed_missing` and tells you to run `sources download-meditron` first.
 
 Every source job writes an indexable JSONL snapshot and appends a snapshot event to:
 
@@ -115,11 +134,13 @@ Acquired official-source records are normalized with:
 - official source URL;
 - adapter-specific IDs and response metadata where available.
 
-The corpus normalizer promotes nested acquisition metadata into `SourceRecord.metadata`, allowing the existing source-policy classifier and validator to see the freshness/currentness flags. A successful API fetch means the record came from the primary source at the recorded time; it does **not** imply every historical publication is clinically current. Publication/edition chronology still has to be validated for the route.
+The corpus normalizer promotes nested acquisition metadata into `SourceRecord.metadata`, allowing the existing source-policy classifier and validator to see the freshness/currentness flags. A successful primary-source fetch means the record came from the primary source at the recorded time; it does **not** imply every historical publication is clinically current. Publication/edition chronology still has to be validated for the route.
 
 ## NICE
 
-The default NICE adapter starts from:
+### Preferred path: licensed Syndication API
+
+When `NICE_API_KEY` is present, the NICE adapter starts from:
 
 ```text
 https://api.nice.org.uk/services/guidance/index
@@ -128,6 +149,19 @@ https://api.nice.org.uk/services/guidance/index
 It sends the licensed API key in the `API-Key` header and follows NICE guidance API links only within `api.nice.org.uk/services/guidance`, bounded by `max_pages` and `max_records`. API resources are cached as normalized JSONL records rather than committed to Git.
 
 Your NICE licence terms remain authoritative for what may be stored, processed, or redistributed. The acquisition code does not override licence restrictions.
+
+### Fallback path: public NICE guidance pages
+
+When `NICE_API_KEY` is absent, `duc-agentic sources sync` automatically uses a controlled public-web resolver:
+
+1. read the local Meditron/EPFL seed;
+2. identify records attributable to NICE;
+3. extract canonical NICE guidance IDs such as `NG`, `CG`, `TA`, `DG`, `MTG`, `IPG`, `PH`, `HSC`, and `SG` identifiers;
+4. resolve each identifier against `https://www.nice.org.uk/guidance/<id>` and its public recommendations page;
+5. store only the newly retrieved public NICE text as the refreshed primary-source record;
+6. retain the Meditron relationship as discovery provenance rather than source authority.
+
+The public fallback does not pretend to be equivalent to the licensed Syndication API. Structured API metadata is richer and should be preferred when available. The fallback is designed to prevent the absence of an API key from removing NICE entirely from DUC mining while preserving explicit provenance and currentness checks.
 
 ## NCBI
 
