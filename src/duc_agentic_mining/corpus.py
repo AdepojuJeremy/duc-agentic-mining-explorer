@@ -76,6 +76,9 @@ def normalize_row(
     if not source_id:
         source_id = sha256(f"{origin}:{ordinal}:{text[:1000]}".encode()).hexdigest()[:20]
     metadata = {k: v for k, v in row.items() if k not in set(cfg.text_fields)}
+    nested_metadata = row.get("metadata")
+    if isinstance(nested_metadata, dict):
+        metadata.update(nested_metadata)
     record = SourceRecord(
         source_id=str(source_id),
         title=_flatten_text(_first(row, cfg.title_fields)).strip(),

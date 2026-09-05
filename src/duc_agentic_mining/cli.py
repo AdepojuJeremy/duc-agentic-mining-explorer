@@ -7,12 +7,15 @@ from pathlib import Path
 import typer
 from rich.console import Console
 
+from .acquisition import load_source_config, source_status, sync_sources
 from .config import load_config
 from .corpus import build_index
 from .derived_metrics import enrich_metrics_file, record_human_review
 from .pipeline import AgenticMiningPipeline
 
 app = typer.Typer(no_args_is_help=True, help="DUC comprehensive agentic source-mining explorer")
+sources_app = typer.Typer(no_args_is_help=True, help="Acquire and inspect external clinical sources.")
+app.add_typer(sources_app, name="sources")
 console = Console()
 
 
@@ -97,6 +100,45 @@ def record_human_review_counts(
         concurrent_anchor_rounds=cfg.roles["explorer"].concurrency,
     )
     console.print(json.dumps(derived, indent=2))
+
+
+@sources_app.command("status")
+def sources_status(config: Path) -> None:
+    """Show configured source jobs, local snapshots, and credential availability."""
+    cfg = load_source_config(config)
+    console.print(json.dumps(source_status(cfg), indent=2))
+
+
+@sources_app.command("sync")
+def sources_sync(
+    config: Path,
+    only: list[str] = typer.Option(
+        [],
+        "--only",
+        help="Run only named source jobs. Repeat --only for multiple jobs.",
+    ),
+    force: bool = typer.Option(False, help="Re-download bulk seed files that already exist."),
+) -> None:
+    """Fetch/cache configured official sources and write normalized JSONL snapshots."""
+    cfg = load_source_config(config)
+    unknown = sorted(set(only) - set(cfg.sources))
+    if unknown:
+        raise typer.BadParameter(f"unknown source jobs: {unknown}")
+    result = sync_sources(cfg, only=set(only) or None, force=force)
+    console.print(json.dumps(result, indent=2))
+
+
+@sources_app.command("download-meditron")
+def download_meditron(
+    config: Path,
+    force: bool = typer.Option(False, help="Re-download even when a local snapshot exists."),
+) -> None:
+    """Convenience wrapper for the configured Meditron/Hugging Face seed job."""
+    cfg = load_source_config(config)
+    if "meditron" not in cfg.sources:
+        raise typer.BadParameter("source config has no 'meditron' job")
+    result = sync_sources(cfg, only={"meditron"}, force=force)
+    console.print(json.dumps(result, indent=2))
 
 
 @app.command("validate-config")

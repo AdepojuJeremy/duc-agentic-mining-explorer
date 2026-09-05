@@ -6,10 +6,13 @@ target_passed: 1200
 
 corpus:
   index_path: ../data/index/guidelines.sqlite
-  # Meditron/EPFL guidelines can seed discovery. Add refreshed primary-source
-  # exports to input_paths as they become available; all are indexed together.
+  # Meditron/EPFL seeds discovery; source acquisition adds versioned official
+  # primary, literature, and regulatory snapshots under data/raw/.
   input_paths:
     - ../data/raw/epfl-llm-guidelines/open_guidelines.jsonl
+    - ../data/raw/primary
+    - ../data/raw/literature
+    - ../data/raw/regulatory
   id_fields: [id, source_id, uuid, doc_id]
   title_fields: [title, name, document_title]
   text_fields: [text, content, body, document, recommendation, passage]
