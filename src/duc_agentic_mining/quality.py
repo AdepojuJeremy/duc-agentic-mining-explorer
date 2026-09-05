@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from difflib import SequenceMatcher
 
-from .models import Candidate, VignetteProposal
+from .models import Candidate, CandidateValidation, VignetteProposal
 
 
 def _norm(text: str) -> str:
@@ -20,6 +20,7 @@ def _contains_answer_cue(context: str, answer: str) -> bool:
 
 def static_vignette_checks(
     candidate: Candidate,
+    validation: CandidateValidation,
     proposal: VignetteProposal,
 ) -> dict[str, object]:
     concerns: list[str] = []
@@ -55,9 +56,9 @@ def static_vignette_checks(
     if not affected_components_present:
         concerns.append("affected_decision_components is empty")
 
-    domain_locked = proposal.decision_domain == candidate.decision_domain
+    domain_locked = proposal.decision_domain == validation.normalized_domain
     if not domain_locked:
-        concerns.append("proposal changed the locked decision domain")
+        concerns.append("proposal changed the validator-normalized decision domain")
 
     return {
         "passed": not concerns,
