@@ -30,7 +30,7 @@ async def review_proposal(
     if not baseline or not modifier:
         raise ValueError("proposal references missing source")
 
-    static = static_vignette_checks(candidate, proposal)
+    static = static_vignette_checks(candidate, validation, proposal)
     source_policy = assess_source_pair(
         baseline,
         modifier,
@@ -84,7 +84,7 @@ async def review_proposal(
     if not bool(static["domain_locked"]):
         value.same_decision_preserved = GroundingGate(
             passed=False,
-            rationale="proposal changed the locked decision domain",
+            rationale="proposal changed the validator-normalized decision domain",
         )
         value.needs_candidate_revalidation = True
     if not source_policy.passed:
