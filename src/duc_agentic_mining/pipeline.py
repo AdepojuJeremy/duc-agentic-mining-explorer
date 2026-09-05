@@ -15,6 +15,13 @@ from .generator import generate_vignette
 from .llm import OpenAIRoleClient
 from .models import Candidate, CandidateValidation, ProposalReview, RunMetrics, VignetteProposal, utc_now
 from .reviewer import review_proposal
+from .targeting import (
+    choose_target_cells,
+    equal_cell_targets,
+    matrix_status,
+    proposal_counts,
+    select_balanced,
+)
 from .validator import validate_candidate
 
 
@@ -27,6 +34,7 @@ class RunPaths:
         self.reviews = root / "proposal_reviews.yaml"
         self.metrics = root / "metrics.yaml"
         self.manifest = root / "run_manifest.yaml"
+        self.target_matrix = root / "target_matrix.yaml"
         self.passed_jsonl = root / "passed_vignettes.jsonl"
         self.trajectories = root / "trajectories"
 
@@ -67,6 +75,11 @@ class AgenticMiningPipeline:
             for role, role_cfg in cfg.roles.items()
         }
         self.started_monotonic = time.monotonic()
+        self.cell_targets = (
+            equal_cell_targets(self.target_passed, cfg.target_matrix)
+            if cfg.target_matrix.balance_mode == "equal"
+            else {}
+        )
 
     def _load_metrics(self) -> RunMetrics:
         if self.paths.metrics.exists():
@@ -90,9 +103,34 @@ class AgenticMiningPipeline:
                 "run_id": self.run_id,
                 "target_passed": self.target_passed,
                 "started_at": self.metrics.started_at,
-                "pipeline_version": "0.1.0",
+                "pipeline_version": "0.2.0",
                 "git_sha": git_sha(),
                 "config": self.cfg.model_dump(mode="json"),
+            },
+        )
+
+    def _update_matrix_artifact(self, accepted: list[VignetteProposal]) -> None:
+        counts = proposal_counts(accepted)
+        self.metrics.passed_by_domain = {}
+        self.metrics.passed_by_arm = {}
+        self.metrics.passed_by_cell = {}
+        for (domain, arm), count in counts.items():
+            self.metrics.passed_by_domain[domain] = self.metrics.passed_by_domain.get(domain, 0) + count
+            self.metrics.passed_by_arm[arm] = self.metrics.passed_by_arm.get(arm, 0) + count
+            self.metrics.passed_by_cell[f"{domain}::{arm}"] = count
+        atomic_yaml(
+            self.paths.target_matrix,
+            {
+                "balance_mode": self.cfg.target_matrix.balance_mode,
+                "formal_evidence_taxonomies": self.cfg.target_matrix.arms,
+                "decision_domains": self.cfg.target_matrix.domains,
+                "controls_are_fourth_taxonomy": False,
+                "cells": matrix_status(self.cell_targets, counts)
+                if self.cell_targets
+                else [],
+                "accepted_by_domain": self.metrics.passed_by_domain,
+                "accepted_by_arm": self.metrics.passed_by_arm,
+                "accepted_by_cell": self.metrics.passed_by_cell,
             },
         )
 
@@ -117,17 +155,21 @@ class AgenticMiningPipeline:
         rev_by_id = {x.candidate_uid: x for x in reviews}
 
         def accepted_now() -> list[VignetteProposal]:
-            rows: list[VignetteProposal] = []
+            deduped: list[VignetteProposal] = []
             for uid, rev in sorted(rev_by_id.items()):
                 if not rev.overall_pass or uid not in prop_by_id:
                     continue
                 proposal = prop_by_id[uid]
+                if proposal.evidence_arm == "no_conflict_control":
+                    continue
                 if self.cfg.dedup.enabled and is_near_duplicate(
-                    proposal, rows, self.cfg.dedup.lexical_similarity_threshold
+                    proposal, deduped, self.cfg.dedup.lexical_similarity_threshold
                 ):
                     continue
-                rows.append(proposal)
-            return rows
+                deduped.append(proposal)
+            if self.cell_targets:
+                return select_balanced(deduped, self.cell_targets, self.target_passed)
+            return deduped[: self.target_passed]
 
         accepted = accepted_now()
         pair_keys = {
@@ -135,6 +177,7 @@ class AgenticMiningPipeline:
         }
         self.metrics.candidates_unique = len(candidates)
         self.metrics.proposals_passed = len(accepted)
+        self._update_matrix_artifact(accepted)
         total_records = self.corpus.count()
         next_round = self.metrics.exploration_rounds_completed
 
@@ -146,24 +189,35 @@ class AgenticMiningPipeline:
                 self.cfg.exploration.round_batch_size,
                 self.cfg.exploration.max_rounds - next_round,
             )
+            current_counts = proposal_counts(accepted)
+            target_cells = (
+                choose_target_cells(self.cell_targets, current_counts, wave)
+                if self.cell_targets
+                else [None] * wave
+            )
             offsets = [
                 random.Random(
                     self.cfg.exploration.random_seed + next_round + i + 1
                 ).randrange(total_records)
                 for i in range(wave)
             ]
-            round_specs = [
-                (
-                    f"round_{next_round + i + 1:06d}",
-                    self.corpus.get_by_offset(offset).source_id,
+            round_specs = []
+            for i, (offset, target_cell) in enumerate(zip(offsets, target_cells, strict=True)):
+                domain = target_cell[0] if target_cell else None
+                arm = target_cell[1] if target_cell else None
+                round_specs.append(
+                    (
+                        f"round_{next_round + i + 1:06d}",
+                        self.corpus.get_by_offset(offset).source_id,
+                        domain,
+                        arm,
+                    )
                 )
-                for i, offset in enumerate(offsets)
-            ]
             explorer_sem = asyncio.Semaphore(self.cfg.roles["explorer"].concurrency)
 
-            async def one_round(spec):
-                rid, anchor = spec
-                async with explorer_sem:
+            async def one_round(spec, sem=explorer_sem):
+                rid, anchor, domain, arm = spec
+                async with sem:
                     return await explore_round(
                         rid,
                         anchor,
@@ -173,6 +227,9 @@ class AgenticMiningPipeline:
                         self.metrics,
                         self.paths.trajectories / f"{rid}.jsonl",
                         pair_keys,
+                        target_domain=domain,
+                        target_arm=arm,
+                        strict_target_cell=self.cfg.target_matrix.strict_explorer_target,
                     )
 
             new_batches = await asyncio.gather(*(one_round(x) for x in round_specs))
@@ -194,6 +251,7 @@ class AgenticMiningPipeline:
                         self.corpus,
                         self.clients["validator"],
                         self.cfg.validation,
+                        self.cfg.source_policy,
                     )
                     return c.candidate_uid, v, None
                 except Exception as exc:
@@ -249,6 +307,7 @@ class AgenticMiningPipeline:
                             proposal,
                             self.corpus,
                             self.clients["reviewer"],
+                            self.cfg.source_policy,
                         )
                         self.metrics.proposal_reviews_completed += 1
                         last_review = review
@@ -258,6 +317,7 @@ class AgenticMiningPipeline:
                                 self.corpus,
                                 self.clients["validator"],
                                 self.cfg.validation,
+                                self.cfg.source_policy,
                                 extra_concerns=review.concerns,
                             )
                             val_by_id[c.candidate_uid] = reval
@@ -286,21 +346,23 @@ class AgenticMiningPipeline:
                 proposals = list(prop_by_id.values())
                 reviews = list(rev_by_id.values())
 
-                accepted = []
+                accepted = accepted_now()
                 dedup_rejected = set()
+                dedup_reference: list[VignetteProposal] = []
                 for uid, rev in sorted(rev_by_id.items()):
                     if not rev.overall_pass or uid not in prop_by_id:
                         continue
                     proposal = prop_by_id[uid]
                     if self.cfg.dedup.enabled and is_near_duplicate(
                         proposal,
-                        accepted,
+                        dedup_reference,
                         self.cfg.dedup.lexical_similarity_threshold,
                     ):
                         dedup_rejected.add(uid)
                         continue
-                    accepted.append(proposal)
+                    dedup_reference.append(proposal)
                 self.metrics.proposals_passed = len(accepted)
+                self._update_matrix_artifact(accepted)
                 atomic_yaml(self.paths.proposals, {"proposals": proposals})
                 atomic_yaml(
                     self.paths.reviews,
@@ -309,15 +371,14 @@ class AgenticMiningPipeline:
                         "dedup_rejected_candidate_uids": sorted(dedup_rejected),
                     },
                 )
-                write_jsonl(
-                    self.paths.passed_jsonl, accepted[: self.target_passed]
-                )
+                write_jsonl(self.paths.passed_jsonl, accepted)
 
             next_round += wave
             self._persist_metrics()
             if len(accepted) >= self.target_passed:
                 break
 
+        self._update_matrix_artifact(accepted)
         self._persist_metrics()
         return {
             "run_id": self.run_id,
@@ -330,4 +391,7 @@ class AgenticMiningPipeline:
             "target": self.target_passed,
             "output": str(self.paths.root),
             "target_reached": len(accepted) >= self.target_passed,
+            "passed_by_domain": self.metrics.passed_by_domain,
+            "passed_by_arm": self.metrics.passed_by_arm,
+            "target_matrix": str(self.paths.target_matrix),
         }
