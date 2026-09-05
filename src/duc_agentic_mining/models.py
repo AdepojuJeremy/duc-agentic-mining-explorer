@@ -6,6 +6,15 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+DecisionDomain = Literal[
+    "diagnosis",
+    "treatment_selection",
+    "triage_urgency",
+    "medication_safety",
+    "public_health_advice",
+    "patient_counselling",
+]
+FormalArm = Literal["contradictory", "complicating", "uncertainty_inducing"]
 Arm = Literal["contradictory", "complicating", "uncertainty_inducing", "no_conflict_control"]
 UpdateClass = Literal["maintain", "revise", "weaken", "strengthen", "abstain"]
 ConfidenceDirection = Literal["increase", "decrease", "maintain", "case_dependent"]
@@ -35,6 +44,7 @@ class Candidate(BaseModel):
     candidate_uid: str
     round_id: str
     anchor_source_id: str
+    decision_domain: DecisionDomain
     decision_question: str
     baseline_source_id: str
     modifier_source_id: str
@@ -67,7 +77,9 @@ class CandidateValidation(BaseModel):
     genuine_update_pressure: Gate
     applicability_coherent: Gate
     arm_and_update_coherent: Gate
+    source_policy: Gate
     promote: bool
+    normalized_domain: DecisionDomain
     normalized_arm: Arm
     normalized_update: UpdateClass
     concerns: list[str]
@@ -81,9 +93,10 @@ class CandidateValidation(BaseModel):
             self.genuine_update_pressure,
             self.applicability_coherent,
             self.arm_and_update_coherent,
+            self.source_policy,
         ]
         if self.promote and not all(g.passed for g in gates):
-            raise ValueError("promote=true requires all six validation gates to pass")
+            raise ValueError("promote=true requires all validation gates to pass")
         return self
 
 
@@ -102,11 +115,36 @@ class ClaimSourceMapEntry(BaseModel):
     support: Literal["direct", "inference", "scenario_premise"]
 
 
+class SourceProvenance(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source_id: str
+    canonical_organization: str | None
+    authority_tier: int | None
+    source_kind: Literal[
+        "guideline_authority",
+        "structured_knowledge_base",
+        "primary_literature",
+        "secondary_clinical",
+        "patient_facing_fallback",
+        "unknown",
+    ]
+    recommendation_authority: bool
+    redistribution_status: Literal["redistributable", "restricted_or_check", "unknown"]
+    source_status: Literal["current", "versioned", "stale_or_superseded", "unknown"]
+    freshness_verified: bool
+    seed_collection: str | None
+    title: str
+    source: str
+    url: str | None
+    date: str | None
+
+
 class VignetteProposal(BaseModel):
     model_config = ConfigDict(extra="forbid")
     candidate_uid: str
     constructible: bool
     unconstructible_reason: str | None
+    decision_domain: DecisionDomain
     clinical_question: str
     stage_1_context: str
     stage_2_update: str
@@ -114,11 +152,13 @@ class VignetteProposal(BaseModel):
     expected_revised_recommendation: str
     evidence_arm: Arm
     expected_update: UpdateClass
+    affected_decision_components: list[str]
     confidence_direction: ConfidenceDirection
     warrant: str
     scenario_premises: list[ScenarioPremise]
     claim_source_map: list[ClaimSourceMapEntry]
     source_ids: list[str]
+    source_provenance: list[SourceProvenance]
     unresolved_questions: list[str]
     draft_number: int
 
@@ -136,8 +176,12 @@ class ProposalReview(BaseModel):
     same_decision_preserved: GroundingGate
     stage_separation: GroundingGate
     no_unsupported_patient_facts: GroundingGate
+    no_answer_cues: GroundingGate
+    nonduplicative_stage2: GroundingGate
     recommendation_grounding: GroundingGate
+    affected_components_consistent: GroundingGate
     arm_and_update_consistency: GroundingGate
+    source_policy_consistent: GroundingGate
     provenance_complete: GroundingGate
     overall_pass: bool
     repairable: bool
@@ -178,6 +222,9 @@ class RunMetrics(BaseModel):
     proposal_reviews_completed: int = 0
     proposals_passed: int = 0
     repairs_attempted: int = 0
+    passed_by_domain: dict[str, int] = Field(default_factory=dict)
+    passed_by_arm: dict[str, int] = Field(default_factory=dict)
+    passed_by_cell: dict[str, int] = Field(default_factory=dict)
     role_usage: dict[str, RoleUsage] = Field(default_factory=dict)
 
     def usage_for(self, role: str) -> RoleUsage:
