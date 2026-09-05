@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,7 @@ _NICE_CODE_RE = re.compile(
     r"(?:/guidance/|\b)(ng|cg|ta|dg|mtg|ipg|ph|hsc|sg)(\d{1,6})\b",
     re.IGNORECASE,
 )
+_PROGRESS_EVERY = 25
 
 
 def _flatten_for_discovery(value: Any) -> str:
@@ -63,7 +65,11 @@ def discover_nice_guidance_codes(seed_path: Path, max_codes: int) -> list[str]:
             haystack = _flatten_for_discovery(row)
             lowered = haystack.lower()
             # Avoid treating unrelated codes as NICE merely because they look similar.
-            if "nice.org.uk" not in lowered and "national institute for health and care excellence" not in lowered and not re.search(r"\bnice\b", lowered):
+            if (
+                "nice.org.uk" not in lowered
+                and "national institute for health and care excellence" not in lowered
+                and not re.search(r"\bnice\b", lowered)
+            ):
                 continue
             for prefix, number in _NICE_CODE_RE.findall(haystack):
                 code = f"{prefix}{number}".lower()
@@ -89,7 +95,9 @@ def _fetch_public_guidance(code: str, cfg: SourceAcquisitionConfig) -> dict[str,
             payload, headers, final = _request(
                 url,
                 cfg.http,
-                headers={"Accept": "text/html,application/xhtml+xml,application/pdf;q=0.9,*/*;q=0.8"},
+                headers={
+                    "Accept": "text/html,application/xhtml+xml,application/pdf;q=0.9,*/*;q=0.8"
+                },
             )
             text = _extract_document_text(payload, headers.get("content-type", ""), final)
             if text and text not in parts:
@@ -125,6 +133,30 @@ def _fetch_public_guidance(code: str, cfg: SourceAcquisitionConfig) -> dict[str,
     )
 
 
+def _load_existing_records(path: Path) -> list[dict[str, Any]]:
+    if not path.exists() or path.stat().st_size == 0:
+        return []
+    records: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(row, dict):
+                records.append(row)
+    return records
+
+
+def _record_guidance_code(record: dict[str, Any]) -> str | None:
+    metadata = record.get("metadata") or {}
+    value = metadata.get("guidance_code")
+    return str(value).lower() if value else None
+
+
 def sync_nice_public_fallback(
     cfg: SourceAcquisitionConfig,
     job: SourceJobConfig,
@@ -141,11 +173,40 @@ def sync_nice_public_fallback(
     if not codes:
         return {"status": "fallback_no_candidates", "seed": str(seed_path), "records": 0}
 
-    records: list[dict[str, Any]] = []
+    records = _load_existing_records(job.output)
+    completed_codes = {
+        code for record in records if (code := _record_guidance_code(record)) is not None
+    }
+    resumed_records = len(records)
+    remaining = sum(1 for code in codes if code not in completed_codes)
+    print(
+        f"[sources:nice] discovered={len(codes)} existing_records={resumed_records} "
+        f"remaining={remaining}",
+        file=sys.stderr,
+        flush=True,
+    )
+
+    processed = 0
+    failed_or_empty = 0
     for code in codes:
+        if code in completed_codes:
+            continue
         record = _fetch_public_guidance(code, cfg)
+        processed += 1
         if record:
             records.append(record)
+            completed_codes.add(code)
+        else:
+            failed_or_empty += 1
+
+        if processed % _PROGRESS_EVERY == 0:
+            _write_jsonl(job.output, records)
+            print(
+                f"[sources:nice] processed={processed}/{remaining} records={len(records)} "
+                f"empty_or_failed={failed_or_empty}",
+                file=sys.stderr,
+                flush=True,
+            )
         time.sleep(1.0 / max(job.rate_limit_per_second, 0.1))
 
     _write_jsonl(job.output, records)
@@ -153,6 +214,9 @@ def sync_nice_public_fallback(
         "status": "synced_public_fallback",
         "records": len(records),
         "candidates": len(codes),
+        "processed_this_run": processed,
+        "resumed_records": resumed_records,
+        "empty_or_failed": failed_or_empty,
         "output": str(job.output),
         "api_key_used": False,
         "discovery_seed": str(seed_path),
