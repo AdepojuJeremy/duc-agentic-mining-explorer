@@ -8,6 +8,7 @@ import typer
 from rich.console import Console
 
 from .acquisition import load_source_config, source_status, sync_sources
+from .catalogue_acquisition import catalogue_status, load_catalogue_config, sync_catalogues
 from .config import load_config
 from .corpus import build_index
 from .derived_metrics import enrich_metrics_file, record_human_review
@@ -105,9 +106,11 @@ def record_human_review_counts(
 
 @sources_app.command("status")
 def sources_status(config: Path) -> None:
-    """Show configured source jobs, local snapshots, and credential availability."""
+    """Show API/bulk and specialty-catalogue source readiness."""
     cfg = load_source_config(config)
+    catalogue_cfg = load_catalogue_config(config)
     rows = annotate_nice_status(cfg, source_status(cfg))
+    rows.update(catalogue_status(catalogue_cfg))
     console.print(json.dumps(rows, indent=2))
 
 
@@ -121,14 +124,17 @@ def sources_sync(
     ),
     force: bool = typer.Option(False, help="Re-download bulk seed files that already exist."),
 ) -> None:
-    """Fetch/cache configured official sources and write normalized JSONL snapshots."""
+    """Fetch/cache configured API sources and constrained specialty catalogues."""
     cfg = load_source_config(config)
-    unknown = sorted(set(only) - set(cfg.sources))
+    catalogue_cfg = load_catalogue_config(config)
+    known = set(cfg.sources) | set(catalogue_cfg.catalogues)
+    unknown = sorted(set(only) - known)
     if unknown:
         raise typer.BadParameter(f"unknown source jobs: {unknown}")
     selected = set(only) or None
     result = sync_sources(cfg, only=selected, force=force)
     result = apply_nice_public_fallback(cfg, result, only=selected)
+    result.update(sync_catalogues(catalogue_cfg, only=selected))
     console.print(json.dumps(result, indent=2))
 
 
