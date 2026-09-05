@@ -16,7 +16,7 @@ def _job(tmp_path: Path, name: str) -> CatalogueJobConfig:
     )
 
 
-def test_acr_override_uses_public_gravitas_topic_endpoints(tmp_path: Path):
+def test_acr_override_uses_public_gravitas_html_narratives(tmp_path: Path):
     cfg = CatalogueAcquisitionConfig(
         raw_root=tmp_path,
         manifest_path=tmp_path / "manifest.jsonl",
@@ -25,11 +25,12 @@ def test_acr_override_uses_public_gravitas_topic_endpoints(tmp_path: Path):
     result = apply_specialty_catalogue_overrides(cfg)
     acr = result.catalogues["acr"]
     assert len(acr.seed_urls) == 400
-    assert acr.seed_urls[0] == "https://gravitas.acr.org/ACPortal/TopicNarrativePdf?topicId=1"
+    assert acr.seed_urls[0] == "https://gravitas.acr.org/ACPortal/TopicNarrative?topicId=1"
     assert acr.seed_urls[-1].endswith("topicId=400")
+    assert all("TopicNarrativePdf" not in url for url in acr.seed_urls)
     assert acr.allowed_hosts == ["gravitas.acr.org"]
     assert acr.max_depth == 0
-    assert acr.allow_pdfs is True
+    assert acr.allow_pdfs is False
     assert acr.request_timeout_seconds == 20.0
     assert acr.request_max_retries == 1
     assert acr.max_consecutive_fetch_errors == 5
