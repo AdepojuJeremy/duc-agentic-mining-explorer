@@ -37,7 +37,9 @@ catalogues:
     ).resolve()
 
 
-def test_catalogue_crawler_discovers_and_records_matching_official_page(monkeypatch, tmp_path: Path):
+def test_catalogue_crawler_discovers_and_records_matching_official_page(
+    monkeypatch, tmp_path: Path
+):
     pages = {
         "https://example.org/catalog": _Fetched(
             b'<html><head><title>Catalogue</title></head><body><a href="/guideline/a">A</a></body></html>',
@@ -68,11 +70,6 @@ def test_catalogue_crawler_discovers_and_records_matching_official_page(monkeypa
         rate_limit_per_second=1000,
     )
     cfg = CatalogueAcquisitionConfig(
-        raw_root=tmp_path,
-        manifest_path=tmp_path / "manifest.jsonl",
-        sources={},
-        catalogues={},
-    ) if False else CatalogueAcquisitionConfig(
         raw_root=tmp_path,
         manifest_path=tmp_path / "manifest.jsonl",
         catalogues={},
@@ -168,3 +165,32 @@ catalogues:
     )
     cfg = _load_catalogues_for_source_config(source_config)
     assert set(cfg.catalogues) == {"idsa", "ismp"}
+
+
+def test_repo_specialty_config_covers_controlled_web_tier1_sources():
+    repo_root = Path(__file__).resolve().parents[1]
+    cfg = _load_catalogues_for_source_config(repo_root / "config" / "sources.yaml")
+    expected = {
+        "uspstf",
+        "idsa",
+        "ontario_health",
+        "acr",
+        "acc_aha",
+        "asco",
+        "acog",
+        "aap",
+        "kdigo",
+        "gina",
+        "gold",
+        "acep",
+        "resuscitation",
+        "mhra",
+        "ema",
+        "ecdc",
+        "ukhsa",
+        "africa_cdc",
+        "who_icrc_emergency",
+        "ismp",
+    }
+    assert expected.issubset(cfg.catalogues)
+    assert all(cfg.catalogues[name].enabled for name in expected)
