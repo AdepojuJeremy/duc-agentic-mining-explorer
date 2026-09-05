@@ -6,6 +6,16 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, Field, model_validator
 
+DecisionDomainName = Literal[
+    "diagnosis",
+    "treatment_selection",
+    "triage_urgency",
+    "medication_safety",
+    "public_health_advice",
+    "patient_counselling",
+]
+FormalArmName = Literal["contradictory", "complicating", "uncertainty_inducing"]
+
 
 class ModelRoleConfig(BaseModel):
     model: str
@@ -27,12 +37,51 @@ class CorpusConfig(BaseModel):
     input_paths: list[Path] = Field(default_factory=list)
     id_fields: list[str] = Field(default_factory=lambda: ["id", "source_id", "uuid", "doc_id"])
     title_fields: list[str] = Field(default_factory=lambda: ["title", "name", "document_title"])
-    text_fields: list[str] = Field(default_factory=lambda: ["text", "content", "body", "document", "recommendation", "passage"])
+    text_fields: list[str] = Field(
+        default_factory=lambda: ["text", "content", "body", "document", "recommendation", "passage"]
+    )
     source_fields: list[str] = Field(default_factory=lambda: ["source", "publisher", "organization"])
     url_fields: list[str] = Field(default_factory=lambda: ["url", "source_url", "link"])
     date_fields: list[str] = Field(default_factory=lambda: ["date", "published_at", "year"])
     max_record_chars: int = Field(default=160_000, ge=1_000)
     search_snippet_chars: int = Field(default=1_200, ge=200)
+
+
+class TargetMatrixConfig(BaseModel):
+    domains: list[DecisionDomainName] = Field(
+        default_factory=lambda: [
+            "diagnosis",
+            "treatment_selection",
+            "triage_urgency",
+            "medication_safety",
+            "public_health_advice",
+            "patient_counselling",
+        ]
+    )
+    arms: list[FormalArmName] = Field(
+        default_factory=lambda: ["contradictory", "complicating", "uncertainty_inducing"]
+    )
+    balance_mode: Literal["equal", "natural"] = "equal"
+    strict_explorer_target: bool = True
+
+    @model_validator(mode="after")
+    def nonempty_unique_matrix(self) -> TargetMatrixConfig:
+        if not self.domains or not self.arms:
+            raise ValueError("target_matrix domains and arms must be non-empty")
+        if len(self.domains) != len(set(self.domains)):
+            raise ValueError("target_matrix domains must be unique")
+        if len(self.arms) != len(set(self.arms)):
+            raise ValueError("target_matrix arms must be unique")
+        return self
+
+
+class SourcePolicyConfig(BaseModel):
+    enabled: bool = True
+    require_recommendation_authority_baseline: bool = False
+    reject_tier2_as_decision_authority: bool = True
+    reject_tier5_as_decision_authority: bool = True
+    require_known_currentness_for_contradictory: bool = False
+    warn_on_restricted_redistribution: bool = True
 
 
 class ExplorationConfig(BaseModel):
@@ -66,6 +115,8 @@ class PipelineConfig(BaseModel):
     output_root: Path = Path("runs")
     target_passed: int = Field(default=1200, ge=1)
     corpus: CorpusConfig = Field(default_factory=CorpusConfig)
+    target_matrix: TargetMatrixConfig = Field(default_factory=TargetMatrixConfig)
+    source_policy: SourcePolicyConfig = Field(default_factory=SourcePolicyConfig)
     openai: OpenAIConfig = Field(default_factory=OpenAIConfig)
     roles: dict[str, ModelRoleConfig]
     exploration: ExplorationConfig = Field(default_factory=ExplorationConfig)
@@ -74,7 +125,7 @@ class PipelineConfig(BaseModel):
     dedup: DedupConfig = Field(default_factory=DedupConfig)
 
     @model_validator(mode="after")
-    def required_roles(self) -> "PipelineConfig":
+    def required_roles(self) -> PipelineConfig:
         missing = {"explorer", "validator", "generator", "reviewer"} - set(self.roles)
         if missing:
             raise ValueError(f"missing role configs: {sorted(missing)}")
@@ -85,7 +136,9 @@ def load_config(path: Path) -> PipelineConfig:
     data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     cfg = PipelineConfig.model_validate(data)
     base = path.parent.resolve()
-    cfg.corpus.input_paths = [((base / p).resolve() if not p.is_absolute() else p) for p in cfg.corpus.input_paths]
+    cfg.corpus.input_paths = [
+        ((base / p).resolve() if not p.is_absolute() else p) for p in cfg.corpus.input_paths
+    ]
     if not cfg.corpus.index_path.is_absolute():
         cfg.corpus.index_path = (base / cfg.corpus.index_path).resolve()
     if not cfg.output_root.is_absolute():

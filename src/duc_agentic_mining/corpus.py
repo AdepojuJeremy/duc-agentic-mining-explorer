@@ -10,6 +10,7 @@ import yaml
 
 from .config import CorpusConfig
 from .models import SourceRecord
+from .source_policy import classify_source
 
 
 class CorpusError(RuntimeError):
@@ -65,7 +66,9 @@ def iter_rows(path: Path) -> Iterator[dict[str, Any]]:
         yield obj
 
 
-def normalize_row(row: dict[str, Any], cfg: CorpusConfig, origin: str, ordinal: int) -> SourceRecord | None:
+def normalize_row(
+    row: dict[str, Any], cfg: CorpusConfig, origin: str, ordinal: int
+) -> SourceRecord | None:
     text = _flatten_text(_first(row, cfg.text_fields)).strip()
     if not text:
         return None
@@ -73,7 +76,7 @@ def normalize_row(row: dict[str, Any], cfg: CorpusConfig, origin: str, ordinal: 
     if not source_id:
         source_id = sha256(f"{origin}:{ordinal}:{text[:1000]}".encode()).hexdigest()[:20]
     metadata = {k: v for k, v in row.items() if k not in set(cfg.text_fields)}
-    return SourceRecord(
+    record = SourceRecord(
         source_id=str(source_id),
         title=_flatten_text(_first(row, cfg.title_fields)).strip(),
         text=text[: cfg.max_record_chars],
@@ -82,6 +85,8 @@ def normalize_row(row: dict[str, Any], cfg: CorpusConfig, origin: str, ordinal: 
         date=(str(_first(row, cfg.date_fields)) if _first(row, cfg.date_fields) else None),
         metadata={"origin": origin, **metadata},
     )
+    record.metadata["_source_policy"] = classify_source(record).to_dict()
+    return record
 
 
 class CorpusStore:
@@ -166,21 +171,26 @@ class CorpusStore:
         )
 
     def get_by_offset(self, offset: int) -> SourceRecord:
-        row = self.conn.execute("SELECT source_id FROM sources ORDER BY source_id LIMIT 1 OFFSET ?", (offset,)).fetchone()
+        row = self.conn.execute(
+            "SELECT source_id FROM sources ORDER BY source_id LIMIT 1 OFFSET ?", (offset,)
+        ).fetchone()
         if not row:
             raise CorpusError(f"no source at offset {offset}")
         record = self.get(row["source_id"])
         assert record is not None
         return record
 
-    def search(self, query: str, limit: int = 5, exclude_ids: Iterable[str] = ()) -> list[dict[str, Any]]:
+    def search(
+        self, query: str, limit: int = 5, exclude_ids: Iterable[str] = ()
+    ) -> list[dict[str, Any]]:
         tokens = [token.strip("()[]{}:;,+-*/\\") for token in query.replace('"', " ").split()]
         tokens = [token for token in tokens if token]
         if not tokens:
             return []
         fts_query = " OR ".join(f'"{token}"' for token in tokens[:24])
         rows = self.conn.execute(
-            """SELECT s.source_id,s.title,s.source,s.date,s.url,s.text,bm25(sources_fts) AS score
+            """SELECT s.source_id,s.title,s.source,s.date,s.url,s.text,s.metadata_json,
+                      bm25(sources_fts) AS score
                FROM sources_fts JOIN sources s ON s.rowid=sources_fts.rowid
                WHERE sources_fts MATCH ? ORDER BY score LIMIT ?""",
             (fts_query, max(limit * 3, limit)),
@@ -190,6 +200,15 @@ class CorpusStore:
         for row in rows:
             if row["source_id"] in excluded:
                 continue
+            record = SourceRecord(
+                source_id=row["source_id"],
+                title=row["title"],
+                text=row["text"],
+                source=row["source"],
+                url=row["url"],
+                date=row["date"],
+                metadata=json.loads(row["metadata_json"]),
+            )
             out.append(
                 {
                     "source_id": row["source_id"],
@@ -197,6 +216,7 @@ class CorpusStore:
                     "source": row["source"],
                     "date": row["date"],
                     "url": row["url"],
+                    "source_policy": classify_source(record).to_dict(),
                     "snippet": row["text"][: self.snippet_chars],
                     "score": row["score"],
                 }
