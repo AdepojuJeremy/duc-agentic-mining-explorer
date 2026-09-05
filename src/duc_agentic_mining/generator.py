@@ -6,7 +6,7 @@ from .config import GenerationConfig
 from .contracts import source_provenance
 from .corpus import CorpusStore
 from .llm import OpenAIRoleClient
-from .models import Candidate, ConstructionContract, VignetteProposal
+from .models import Candidate, ConstructionContract, VignetteDraft, VignetteProposal
 from .prompts import GENERATOR_SYSTEM
 
 
@@ -37,22 +37,32 @@ async def generate_vignette(
     result = await client.structured(
         GENERATOR_SYSTEM,
         json.dumps(payload, ensure_ascii=False),
-        VignetteProposal,
-        "vignette_proposal",
+        VignetteDraft,
+        "vignette_draft",
     )
-    value = result.value
-    assert isinstance(value, VignetteProposal)
+    draft = result.value
+    assert isinstance(draft, VignetteDraft)
 
-    # Host-owned contract fields are copied back deterministically rather than
-    # trusting the model to reproduce immutable construction metadata.
-    value.candidate_uid = candidate.candidate_uid
-    value.contract_uid = contract.contract_uid
-    value.draft_number = draft_number
-    value.decision_domain = contract.decision_domain
-    value.clinical_question = contract.decision_question
-    value.evidence_arm = contract.evidence_arm
-    value.expected_update = contract.expected_update
-    value.affected_decision_components = list(contract.affected_decision_components)
-    value.source_ids = [contract.baseline_source_id, contract.modifier_source_id]
-    value.source_provenance = [source_provenance(baseline), source_provenance(modifier)]
-    return value
+    return VignetteProposal(
+        candidate_uid=candidate.candidate_uid,
+        contract_uid=contract.contract_uid,
+        constructible=draft.constructible,
+        unconstructible_reason=draft.unconstructible_reason,
+        decision_domain=contract.decision_domain,
+        clinical_question=contract.decision_question,
+        stage_1_context=draft.stage_1_context,
+        stage_2_update=draft.stage_2_update,
+        expected_initial_recommendation=draft.expected_initial_recommendation,
+        expected_revised_recommendation=draft.expected_revised_recommendation,
+        evidence_arm=contract.evidence_arm,
+        expected_update=contract.expected_update,
+        affected_decision_components=list(contract.affected_decision_components),
+        confidence_direction=draft.confidence_direction,
+        warrant=draft.warrant,
+        scenario_premises=draft.scenario_premises,
+        claim_source_map=draft.claim_source_map,
+        source_ids=[contract.baseline_source_id, contract.modifier_source_id],
+        source_provenance=[source_provenance(baseline), source_provenance(modifier)],
+        unresolved_questions=draft.unresolved_questions,
+        draft_number=draft_number,
+    )
