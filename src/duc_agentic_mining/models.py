@@ -162,6 +162,21 @@ class ClaimSourceMapEntry(BaseModel):
     support: Literal["direct", "inference", "scenario_premise"]
 
 
+class VignetteDraft(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    constructible: bool
+    unconstructible_reason: str | None
+    stage_1_context: str
+    stage_2_update: str
+    expected_initial_recommendation: str
+    expected_revised_recommendation: str
+    confidence_direction: ConfidenceDirection
+    warrant: str
+    scenario_premises: list[ScenarioPremise]
+    claim_source_map: list[ClaimSourceMapEntry]
+    unresolved_questions: list[str]
+
+
 class VignetteProposal(BaseModel):
     model_config = ConfigDict(extra="forbid")
     candidate_uid: str
