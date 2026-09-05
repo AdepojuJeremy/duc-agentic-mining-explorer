@@ -8,6 +8,7 @@ import typer
 from rich.console import Console
 
 from .acquisition import load_source_config, source_status, sync_sources
+from .catalogue_acquisition import catalogue_status, load_catalogue_config, sync_catalogues
 from .config import load_config
 from .corpus import build_index
 from .derived_metrics import enrich_metrics_file, record_human_review
@@ -18,6 +19,21 @@ app = typer.Typer(no_args_is_help=True, help="DUC comprehensive agentic source-m
 sources_app = typer.Typer(no_args_is_help=True, help="Acquire and inspect external clinical sources.")
 app.add_typer(sources_app, name="sources")
 console = Console()
+
+
+def _load_catalogues_for_source_config(config: Path):
+    catalogue_paths = [
+        config.parent / "specialty_catalogues.yaml",
+        config.parent / "specialty_catalogues_extra.yaml",
+    ]
+    existing = [path for path in catalogue_paths if path.exists()]
+    if not existing:
+        return load_catalogue_config(config)
+    merged = load_catalogue_config(existing[0])
+    for path in existing[1:]:
+        extra = load_catalogue_config(path)
+        merged.catalogues.update(extra.catalogues)
+    return merged
 
 
 @app.command()
@@ -105,9 +121,11 @@ def record_human_review_counts(
 
 @sources_app.command("status")
 def sources_status(config: Path) -> None:
-    """Show configured source jobs, local snapshots, and credential availability."""
+    """Show API/bulk and specialty-catalogue source readiness."""
     cfg = load_source_config(config)
+    catalogue_cfg = _load_catalogues_for_source_config(config)
     rows = annotate_nice_status(cfg, source_status(cfg))
+    rows.update(catalogue_status(catalogue_cfg))
     console.print(json.dumps(rows, indent=2))
 
 
@@ -121,14 +139,17 @@ def sources_sync(
     ),
     force: bool = typer.Option(False, help="Re-download bulk seed files that already exist."),
 ) -> None:
-    """Fetch/cache configured official sources and write normalized JSONL snapshots."""
+    """Fetch/cache configured API sources and constrained specialty catalogues."""
     cfg = load_source_config(config)
-    unknown = sorted(set(only) - set(cfg.sources))
+    catalogue_cfg = _load_catalogues_for_source_config(config)
+    known = set(cfg.sources) | set(catalogue_cfg.catalogues)
+    unknown = sorted(set(only) - known)
     if unknown:
         raise typer.BadParameter(f"unknown source jobs: {unknown}")
     selected = set(only) or None
     result = sync_sources(cfg, only=selected, force=force)
     result = apply_nice_public_fallback(cfg, result, only=selected)
+    result.update(sync_catalogues(catalogue_cfg, only=selected))
     console.print(json.dumps(result, indent=2))
 
 

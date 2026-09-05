@@ -1,0 +1,63 @@
+# Additional Tier-1 controlled-web authorities from the domain registry.
+raw_root: ../data/raw
+manifest_path: ../data/raw/manifests/source_manifest.jsonl
+
+http:
+  timeout_seconds: 90
+  max_retries: 4
+  user_agent: DUC-Agentic-Mining/0.1 research-source-acquisition
+
+catalogues:
+  who_icrc_emergency:
+    enabled: true
+    canonical_source: WHO / ICRC emergency care
+    output: primary/who_icrc_emergency/who_icrc_emergency_guidance.jsonl
+    seed_urls:
+      - https://www.who.int/tools/triage
+      - https://www.who.int/teams/integrated-health-services/clinical-services-and-systems/emergency-and-critical-care/emergency-care-toolkit
+      - https://www.who.int/publications/i/item/basic-emergency-care-approach-to-the-acutely-ill-and-injured
+      - https://www.icrc.org/en/publication/basic-emergency-care-approach-acutely-ill-and-injured
+    allowed_hosts: [www.who.int, who.int, www.icrc.org, icrc.org]
+    crawl_patterns:
+      - '/tools/triage'
+      - '/emergency-and-critical-care/'
+      - '/basic-emergency-care'
+      - '/publication/basic-emergency-care'
+      - '\.pdf$'
+    record_patterns:
+      - '/tools/triage'
+      - '/emergency-and-critical-care/.+'
+      - '/basic-emergency-care.+'
+      - '/publication/basic-emergency-care.+'
+      - '\.pdf$'
+    required_text_patterns: ['WHO|World Health Organization|ICRC|International Committee of the Red Cross|emergency care|triage']
+    max_depth: 2
+    max_pages: 140
+    max_records: 100
+    rate_limit_per_second: 1
+    allow_pdfs: true
+
+  ismp:
+    enabled: true
+    canonical_source: ISMP
+    output: primary/ismp/ismp_guidance.jsonl
+    seed_urls:
+      - https://www.ismp.org/guidelines
+      - https://www.ismp.org/resources
+    allowed_hosts: [www.ismp.org, ismp.org]
+    crawl_patterns:
+      - '/guidelines'
+      - '/resources'
+      - '/system/files/resources/'
+      - '/sites/default/files/'
+      - '\.pdf$'
+    record_patterns:
+      - '/guidelines/.+'
+      - '/system/files/resources/.+\.pdf$'
+      - '/sites/default/files/.+\.pdf$'
+    required_text_patterns: ['ISMP|Institute for Safe Medication Practices|medication safety']
+    max_depth: 3
+    max_pages: 240
+    max_records: 160
+    rate_limit_per_second: 0.75
+    allow_pdfs: true
