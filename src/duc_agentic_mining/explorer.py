@@ -8,7 +8,7 @@ from .artifacts import append_jsonl
 from .config import ExplorationConfig
 from .corpus import CorpusStore
 from .llm import OpenAIRoleClient
-from .models import Candidate, RunMetrics, ToolEvent, stable_id
+from .models import Candidate, DecisionDomain, FormalArm, RunMetrics, ToolEvent, stable_id
 from .prompts import EXPLORER_SYSTEM
 
 
@@ -52,6 +52,17 @@ def explorer_tools(cfg: ExplorationConfig) -> list[dict[str, Any]]:
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "decision_domain": {
+                        "type": "string",
+                        "enum": [
+                            "diagnosis",
+                            "treatment_selection",
+                            "triage_urgency",
+                            "medication_safety",
+                            "public_health_advice",
+                            "patient_counselling",
+                        ],
+                    },
                     "decision_question": {"type": "string"},
                     "baseline_source_id": {"type": "string"},
                     "modifier_source_id": {"type": "string"},
@@ -73,6 +84,7 @@ def explorer_tools(cfg: ExplorationConfig) -> list[dict[str, Any]]:
                     "concerns": {"type": "array", "items": {"type": "string"}},
                 },
                 "required": [
+                    "decision_domain",
                     "decision_question",
                     "baseline_source_id",
                     "modifier_source_id",
@@ -110,6 +122,9 @@ async def explore_round(
     metrics: RunMetrics,
     trajectory_path: Path,
     existing_pair_keys: set[tuple[str, str]],
+    target_domain: DecisionDomain | None = None,
+    target_arm: FormalArm | None = None,
+    strict_target_cell: bool = True,
 ) -> list[Candidate]:
     anchor = corpus.get(anchor_id)
     if not anchor:
@@ -164,6 +179,16 @@ async def explore_round(
         if name == "record_candidate":
             if len(candidates) >= cfg.max_candidates_per_round:
                 return {"ok": False, "error": "candidate budget exhausted"}
+            if strict_target_cell and target_domain and args["decision_domain"] != target_domain:
+                return {
+                    "ok": False,
+                    "error": f"target decision_domain is {target_domain}; candidate used {args['decision_domain']}",
+                }
+            if strict_target_cell and target_arm and args["proposed_arm"] != target_arm:
+                return {
+                    "ok": False,
+                    "error": f"target evidence arm is {target_arm}; candidate used {args['proposed_arm']}",
+                }
             if (
                 args["baseline_source_id"] not in opened
                 or args["modifier_source_id"] not in opened
@@ -201,8 +226,14 @@ async def explore_round(
             return {"ok": True, "finished": True, "_stop": True}
         return {"ok": False, "error": f"unknown tool {name}"}
 
+    target_text = (
+        f"TARGET_CELL: decision_domain={target_domain}, evidence_arm={target_arm}\n"
+        if target_domain and target_arm
+        else "TARGET_CELL: none; discover any valid formal DUC route.\n"
+    )
     prompt = (
         f"ROUND_ID: {round_id}\n"
+        f"{target_text}"
         f"ANCHOR_SOURCE:\n{json.dumps(anchor.model_dump(mode='json'), ensure_ascii=False)}\n\n"
         "Explore for one or more clinically stageable evidence routes starting from this anchor."
     )
@@ -230,7 +261,11 @@ async def explore_round(
             ToolEvent(
                 kind="round_end",
                 name="implicit_end",
-                payload={"candidates": len(candidates)},
+                payload={
+                    "candidates": len(candidates),
+                    "target_domain": target_domain,
+                    "target_arm": target_arm,
+                },
             )
         )
     return candidates
