@@ -1,0 +1,52 @@
+# Practical 1,200-item run: inexpensive OpenAI model across all roles.
+# Increase max_rounds if the final-pass yield is lower than expected.
+output_root: ../runs
+target_passed: 1200
+
+corpus:
+  index_path: ../data/index/guidelines.sqlite
+  # Point this at your local trusted source corpus, e.g. the EPFL guidelines snapshot.
+  input_paths:
+    - ../data/raw/epfl-llm-guidelines/open_guidelines.jsonl
+  id_fields: [id, source_id, uuid, doc_id]
+  title_fields: [title, name, document_title]
+  text_fields: [text, content, body, document, recommendation, passage]
+  source_fields: [source, publisher, organization]
+  url_fields: [url, source_url, link]
+  date_fields: [date, published_at, year]
+  max_record_chars: 160000
+  search_snippet_chars: 1200
+
+openai:
+  api_key_env: OPENAI_API_KEY
+  base_url: null
+  timeout_seconds: 180
+  max_retries: 5
+
+roles:
+  explorer: {model: gpt-5.6-luna, concurrency: 8, max_output_tokens: 5000, reasoning_effort: low}
+  validator: {model: gpt-5.6-luna, concurrency: 6, max_output_tokens: 4500, reasoning_effort: low}
+  generator: {model: gpt-5.6-luna, concurrency: 6, max_output_tokens: 6000, reasoning_effort: low}
+  reviewer: {model: gpt-5.6-luna, concurrency: 6, max_output_tokens: 4500, reasoning_effort: low}
+
+exploration:
+  max_rounds: 2200
+  round_batch_size: 50
+  max_turns_per_round: 32
+  max_searches_per_round: 6
+  max_opens_per_round: 10
+  max_candidates_per_round: 3
+  max_results_per_search: 5
+  random_seed: 42
+  trace_include_tool_outputs: false
+
+validation:
+  max_input_chars: 400000
+
+generation:
+  max_drafts_per_candidate: 3
+  max_source_chars_each: 120000
+
+dedup:
+  enabled: true
+  lexical_similarity_threshold: 0.92

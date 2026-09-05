@@ -1,0 +1,333 @@
+from __future__ import annotations
+
+import asyncio
+import random
+import subprocess
+import time
+from pathlib import Path
+
+from .artifacts import atomic_yaml, load_yaml_items, write_jsonl
+from .config import PipelineConfig
+from .corpus import CorpusStore, build_index
+from .dedup import is_near_duplicate
+from .explorer import explore_round
+from .generator import generate_vignette
+from .llm import OpenAIRoleClient
+from .models import Candidate, CandidateValidation, ProposalReview, RunMetrics, VignetteProposal, utc_now
+from .reviewer import review_proposal
+from .validator import validate_candidate
+
+
+class RunPaths:
+    def __init__(self, root: Path):
+        self.root = root
+        self.candidates = root / "candidates.yaml"
+        self.validations = root / "validations.yaml"
+        self.proposals = root / "vignette_proposals.yaml"
+        self.reviews = root / "proposal_reviews.yaml"
+        self.metrics = root / "metrics.yaml"
+        self.manifest = root / "run_manifest.yaml"
+        self.passed_jsonl = root / "passed_vignettes.jsonl"
+        self.trajectories = root / "trajectories"
+
+
+def git_sha() -> str | None:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL
+        ).strip()
+    except Exception:
+        return None
+
+
+class AgenticMiningPipeline:
+    def __init__(
+        self,
+        cfg: PipelineConfig,
+        run_id: str,
+        target_passed: int | None = None,
+    ):
+        self.cfg = cfg
+        self.run_id = run_id
+        self.target_passed = target_passed or cfg.target_passed
+        self.paths = RunPaths(cfg.output_root / run_id)
+        self.paths.root.mkdir(parents=True, exist_ok=True)
+        self.paths.trajectories.mkdir(parents=True, exist_ok=True)
+        self.metrics = self._load_metrics()
+        if cfg.corpus.input_paths:
+            self.corpus, _ = build_index(cfg.corpus, replace=False)
+        else:
+            self.corpus = CorpusStore(cfg.corpus.index_path, cfg.corpus.search_snippet_chars)
+        if self.corpus.count() == 0:
+            raise RuntimeError(
+                "corpus index is empty; run `duc-agentic index CONFIG` or configure corpus.input_paths"
+            )
+        self.clients = {
+            role: OpenAIRoleClient(role, cfg.openai, role_cfg, self.metrics)
+            for role, role_cfg in cfg.roles.items()
+        }
+        self.started_monotonic = time.monotonic()
+
+    def _load_metrics(self) -> RunMetrics:
+        if self.paths.metrics.exists():
+            import yaml
+
+            return RunMetrics.model_validate(
+                yaml.safe_load(self.paths.metrics.read_text(encoding="utf-8"))
+            )
+        return RunMetrics(run_id=self.run_id)
+
+    def _persist_metrics(self) -> None:
+        self.metrics.updated_at = utc_now()
+        self.metrics.elapsed_seconds += max(0, time.monotonic() - self.started_monotonic)
+        self.started_monotonic = time.monotonic()
+        atomic_yaml(self.paths.metrics, self.metrics)
+
+    def _manifest(self) -> None:
+        atomic_yaml(
+            self.paths.manifest,
+            {
+                "run_id": self.run_id,
+                "target_passed": self.target_passed,
+                "started_at": self.metrics.started_at,
+                "pipeline_version": "0.1.0",
+                "git_sha": git_sha(),
+                "config": self.cfg.model_dump(mode="json"),
+            },
+        )
+
+    async def run(self) -> dict:
+        self._manifest()
+        candidates: list[Candidate] = load_yaml_items(
+            self.paths.candidates, "candidates", Candidate
+        )
+        validations: list[CandidateValidation] = load_yaml_items(
+            self.paths.validations, "validations", CandidateValidation
+        )
+        proposals: list[VignetteProposal] = load_yaml_items(
+            self.paths.proposals, "proposals", VignetteProposal
+        )
+        reviews: list[ProposalReview] = load_yaml_items(
+            self.paths.reviews, "reviews", ProposalReview
+        )
+
+        cand_by_id = {x.candidate_uid: x for x in candidates}
+        val_by_id = {x.candidate_uid: x for x in validations}
+        prop_by_id = {x.candidate_uid: x for x in proposals}
+        rev_by_id = {x.candidate_uid: x for x in reviews}
+
+        def accepted_now() -> list[VignetteProposal]:
+            rows: list[VignetteProposal] = []
+            for uid, rev in sorted(rev_by_id.items()):
+                if not rev.overall_pass or uid not in prop_by_id:
+                    continue
+                proposal = prop_by_id[uid]
+                if self.cfg.dedup.enabled and is_near_duplicate(
+                    proposal, rows, self.cfg.dedup.lexical_similarity_threshold
+                ):
+                    continue
+                rows.append(proposal)
+            return rows
+
+        accepted = accepted_now()
+        pair_keys = {
+            tuple(sorted((c.baseline_source_id, c.modifier_source_id))) for c in candidates
+        }
+        self.metrics.candidates_unique = len(candidates)
+        self.metrics.proposals_passed = len(accepted)
+        total_records = self.corpus.count()
+        next_round = self.metrics.exploration_rounds_completed
+
+        while (
+            len(accepted) < self.target_passed
+            and next_round < self.cfg.exploration.max_rounds
+        ):
+            wave = min(
+                self.cfg.exploration.round_batch_size,
+                self.cfg.exploration.max_rounds - next_round,
+            )
+            offsets = [
+                random.Random(
+                    self.cfg.exploration.random_seed + next_round + i + 1
+                ).randrange(total_records)
+                for i in range(wave)
+            ]
+            round_specs = [
+                (
+                    f"round_{next_round + i + 1:06d}",
+                    self.corpus.get_by_offset(offset).source_id,
+                )
+                for i, offset in enumerate(offsets)
+            ]
+            explorer_sem = asyncio.Semaphore(self.cfg.roles["explorer"].concurrency)
+
+            async def one_round(spec):
+                rid, anchor = spec
+                async with explorer_sem:
+                    return await explore_round(
+                        rid,
+                        anchor,
+                        self.corpus,
+                        self.clients["explorer"],
+                        self.cfg.exploration,
+                        self.metrics,
+                        self.paths.trajectories / f"{rid}.jsonl",
+                        pair_keys,
+                    )
+
+            new_batches = await asyncio.gather(*(one_round(x) for x in round_specs))
+            for batch in new_batches:
+                for c in batch:
+                    cand_by_id.setdefault(c.candidate_uid, c)
+            candidates = list(cand_by_id.values())
+            self.metrics.candidates_unique = len(candidates)
+            atomic_yaml(self.paths.candidates, {"candidates": candidates})
+
+            pending_validation = [
+                c for c in candidates if c.candidate_uid not in val_by_id
+            ]
+
+            async def do_validate(c: Candidate):
+                try:
+                    v = await validate_candidate(
+                        c,
+                        self.corpus,
+                        self.clients["validator"],
+                        self.cfg.validation,
+                    )
+                    return c.candidate_uid, v, None
+                except Exception as exc:
+                    return c.candidate_uid, None, f"{type(exc).__name__}: {exc}"
+
+            for uid, val, _err in await asyncio.gather(
+                *(do_validate(c) for c in pending_validation)
+            ):
+                if val:
+                    val_by_id[uid] = val
+                    self.metrics.validations_completed += 1
+                    if val.promote:
+                        self.metrics.candidates_promoted += 1
+            validations = list(val_by_id.values())
+            atomic_yaml(self.paths.validations, {"validations": validations})
+
+            pending_generation = [
+                c
+                for c in candidates
+                if val_by_id.get(c.candidate_uid)
+                and val_by_id[c.candidate_uid].promote
+                and not (
+                    rev_by_id.get(c.candidate_uid)
+                    and rev_by_id[c.candidate_uid].overall_pass
+                )
+            ]
+
+            async def construct(c: Candidate):
+                validation = val_by_id[c.candidate_uid]
+                last_review: ProposalReview | None = None
+                proposal: VignetteProposal | None = prop_by_id.get(c.candidate_uid)
+                repair_instructions: list[str] = []
+                start_draft = (proposal.draft_number + 1) if proposal else 1
+                for draft_no in range(
+                    start_draft, self.cfg.generation.max_drafts_per_candidate + 1
+                ):
+                    try:
+                        proposal = await generate_vignette(
+                            c,
+                            validation,
+                            self.corpus,
+                            self.clients["generator"],
+                            self.cfg.generation,
+                            draft_no,
+                            repair_instructions,
+                        )
+                        self.metrics.proposals_generated += 1
+                        if not proposal.constructible:
+                            return c.candidate_uid, proposal, None
+                        review = await review_proposal(
+                            c,
+                            validation,
+                            proposal,
+                            self.corpus,
+                            self.clients["reviewer"],
+                        )
+                        self.metrics.proposal_reviews_completed += 1
+                        last_review = review
+                        if review.needs_candidate_revalidation:
+                            reval = await validate_candidate(
+                                c,
+                                self.corpus,
+                                self.clients["validator"],
+                                self.cfg.validation,
+                                extra_concerns=review.concerns,
+                            )
+                            val_by_id[c.candidate_uid] = reval
+                            if not reval.promote:
+                                return c.candidate_uid, proposal, review
+                            validation = reval
+                        if review.overall_pass:
+                            return c.candidate_uid, proposal, review
+                        if not review.repairable:
+                            return c.candidate_uid, proposal, review
+                        repair_instructions = review.repair_instructions
+                        self.metrics.repairs_attempted += 1
+                    except Exception:
+                        continue
+                return c.candidate_uid, proposal, last_review
+
+            if pending_generation:
+                results = await asyncio.gather(
+                    *(construct(c) for c in pending_generation)
+                )
+                for uid, prop, rev in results:
+                    if prop:
+                        prop_by_id[uid] = prop
+                    if rev:
+                        rev_by_id[uid] = rev
+                proposals = list(prop_by_id.values())
+                reviews = list(rev_by_id.values())
+
+                accepted = []
+                dedup_rejected = set()
+                for uid, rev in sorted(rev_by_id.items()):
+                    if not rev.overall_pass or uid not in prop_by_id:
+                        continue
+                    proposal = prop_by_id[uid]
+                    if self.cfg.dedup.enabled and is_near_duplicate(
+                        proposal,
+                        accepted,
+                        self.cfg.dedup.lexical_similarity_threshold,
+                    ):
+                        dedup_rejected.add(uid)
+                        continue
+                    accepted.append(proposal)
+                self.metrics.proposals_passed = len(accepted)
+                atomic_yaml(self.paths.proposals, {"proposals": proposals})
+                atomic_yaml(
+                    self.paths.reviews,
+                    {
+                        "reviews": reviews,
+                        "dedup_rejected_candidate_uids": sorted(dedup_rejected),
+                    },
+                )
+                write_jsonl(
+                    self.paths.passed_jsonl, accepted[: self.target_passed]
+                )
+
+            next_round += wave
+            self._persist_metrics()
+            if len(accepted) >= self.target_passed:
+                break
+
+        self._persist_metrics()
+        return {
+            "run_id": self.run_id,
+            "corpus_records": self.corpus.count(),
+            "rounds_completed": self.metrics.exploration_rounds_completed,
+            "candidates": len(cand_by_id),
+            "promoted": sum(1 for x in val_by_id.values() if x.promote),
+            "reviewed": len(rev_by_id),
+            "passed": min(len(accepted), self.target_passed),
+            "target": self.target_passed,
+            "output": str(self.paths.root),
+            "target_reached": len(accepted) >= self.target_passed,
+        }
