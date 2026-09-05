@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,14 @@ from .corpus import CorpusStore
 from .llm import OpenAIRoleClient
 from .models import Candidate, DecisionDomain, FormalArm, RunMetrics, ToolEvent, stable_id
 from .prompts import EXPLORER_SYSTEM
+
+
+def _span_is_grounded(span: str, source_text: str) -> bool:
+    def norm(value: str) -> str:
+        return re.sub(r"\s+", " ", value).strip()
+
+    candidate = norm(span)
+    return len(candidate) >= 20 and candidate in norm(source_text)
 
 
 def explorer_tools(cfg: ExplorationConfig) -> list[dict[str, Any]]:
@@ -48,7 +57,7 @@ def explorer_tools(cfg: ExplorationConfig) -> list[dict[str, Any]]:
         {
             "type": "function",
             "name": "record_candidate",
-            "description": "Record a proposed DUC evidence route. This does not validate or endorse it.",
+            "description": "Record a proposed DUC evidence route with exact copied evidence spans. This does not validate or endorse it.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -66,6 +75,8 @@ def explorer_tools(cfg: ExplorationConfig) -> list[dict[str, Any]]:
                     "decision_question": {"type": "string"},
                     "baseline_source_id": {"type": "string"},
                     "modifier_source_id": {"type": "string"},
+                    "baseline_evidence_span": {"type": "string", "minLength": 20},
+                    "modifier_evidence_span": {"type": "string", "minLength": 20},
                     "relationship_summary": {"type": "string"},
                     "proposed_arm": {
                         "type": "string",
@@ -88,6 +99,8 @@ def explorer_tools(cfg: ExplorationConfig) -> list[dict[str, Any]]:
                     "decision_question",
                     "baseline_source_id",
                     "modifier_source_id",
+                    "baseline_evidence_span",
+                    "modifier_evidence_span",
                     "relationship_summary",
                     "proposed_arm",
                     "expected_update",
@@ -194,10 +207,20 @@ async def explore_round(
                 or args["modifier_source_id"] not in opened
             ):
                 return {"ok": False, "error": "both sources must be opened before recording"}
-            if not corpus.get(args["baseline_source_id"]) or not corpus.get(
-                args["modifier_source_id"]
-            ):
+            baseline = corpus.get(args["baseline_source_id"])
+            modifier = corpus.get(args["modifier_source_id"])
+            if not baseline or not modifier:
                 return {"ok": False, "error": "unknown source id"}
+            if not _span_is_grounded(args["baseline_evidence_span"], baseline.text):
+                return {
+                    "ok": False,
+                    "error": "baseline_evidence_span must be copied from the opened baseline source",
+                }
+            if not _span_is_grounded(args["modifier_evidence_span"], modifier.text):
+                return {
+                    "ok": False,
+                    "error": "modifier_evidence_span must be copied from the opened modifier source",
+                }
             pair_key = tuple(
                 sorted((args["baseline_source_id"], args["modifier_source_id"]))
             )
@@ -235,7 +258,8 @@ async def explore_round(
         f"ROUND_ID: {round_id}\n"
         f"{target_text}"
         f"ANCHOR_SOURCE:\n{json.dumps(anchor.model_dump(mode='json'), ensure_ascii=False)}\n\n"
-        "Explore for one or more clinically stageable evidence routes starting from this anchor."
+        "Explore for one or more clinically stageable evidence routes starting from this anchor. "
+        "When recording a route, copy the exact baseline and modifier evidence spans from the opened records."
     )
     metrics.exploration_rounds_started += 1
     try:
