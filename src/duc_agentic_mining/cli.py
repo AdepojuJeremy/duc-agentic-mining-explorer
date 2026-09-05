@@ -21,6 +21,11 @@ app.add_typer(sources_app, name="sources")
 console = Console()
 
 
+def _load_catalogues_for_source_config(config: Path):
+    sibling = config.parent / "specialty_catalogues.yaml"
+    return load_catalogue_config(sibling if sibling.exists() else config)
+
+
 @app.command()
 def index(
     config: Path,
@@ -108,7 +113,7 @@ def record_human_review_counts(
 def sources_status(config: Path) -> None:
     """Show API/bulk and specialty-catalogue source readiness."""
     cfg = load_source_config(config)
-    catalogue_cfg = load_catalogue_config(config)
+    catalogue_cfg = _load_catalogues_for_source_config(config)
     rows = annotate_nice_status(cfg, source_status(cfg))
     rows.update(catalogue_status(catalogue_cfg))
     console.print(json.dumps(rows, indent=2))
@@ -126,7 +131,7 @@ def sources_sync(
 ) -> None:
     """Fetch/cache configured API sources and constrained specialty catalogues."""
     cfg = load_source_config(config)
-    catalogue_cfg = load_catalogue_config(config)
+    catalogue_cfg = _load_catalogues_for_source_config(config)
     known = set(cfg.sources) | set(catalogue_cfg.catalogues)
     unknown = sorted(set(only) - known)
     if unknown:
