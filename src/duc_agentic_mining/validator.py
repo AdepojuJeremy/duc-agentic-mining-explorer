@@ -11,9 +11,12 @@ from .prompts import VALIDATOR_SYSTEM
 from .source_policy import assess_source_pair
 
 
+def _normalize_span(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip()
+
+
 def _span_present(span: str, text: str) -> bool:
-    normalize = lambda value: re.sub(r"\s+", " ", value).strip()
-    return normalize(span) in normalize(text)
+    return _normalize_span(span) in _normalize_span(text)
 
 
 async def validate_candidate(
