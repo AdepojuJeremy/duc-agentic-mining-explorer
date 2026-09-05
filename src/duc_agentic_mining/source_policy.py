@@ -6,6 +6,7 @@ from typing import Any, Literal
 
 from .config import SourcePolicyConfig
 from .models import SourceRecord
+from .source_registry import AuthoritativeSource, SOURCES
 
 SourceKind = Literal[
     "guideline_authority",
@@ -60,59 +61,51 @@ class PairPolicyAssessment:
         }
 
 
-RULES: tuple[SourceRule, ...] = (
-    SourceRule(
-        "NICE",
-        1,
-        "guideline_authority",
-        True,
-        "redistributable",
-        ("nice.org.uk", "national institute for health and care excellence", "nice"),
-    ),
-    SourceRule(
-        "WHO",
-        1,
-        "guideline_authority",
-        True,
-        "redistributable",
-        ("who.int", "world health organization", "who"),
-    ),
-    SourceRule(
-        "CDC",
-        1,
-        "guideline_authority",
-        True,
-        "redistributable",
-        ("cdc.gov", "centers for disease control and prevention", "cdc"),
-    ),
-    SourceRule(
-        "USPSTF",
-        1,
-        "guideline_authority",
-        True,
-        "unknown",
-        (
-            "uspstf",
-            "us preventive services task force",
-            "u.s. preventive services task force",
-        ),
-    ),
-    SourceRule(
-        "IDSA",
-        1,
-        "guideline_authority",
-        True,
-        "restricted_or_check",
-        ("idsociety.org", "infectious diseases society of america", "idsa"),
-    ),
-    SourceRule(
-        "Ontario Health / Cancer Care Ontario",
-        1,
-        "guideline_authority",
-        True,
-        "redistributable",
-        ("cancercareontario.ca", "cancer care ontario", "ontario health"),
-    ),
+_REDISTRIBUTION_OVERRIDES: dict[str, RedistributionStatus] = {
+    "NICE": "restricted_or_check",
+    "WHO": "redistributable",
+    "CDC": "redistributable",
+    "Ontario Health / Cancer Care Ontario": "redistributable",
+    "WHO / ICRC emergency care": "redistributable",
+    "BNF": "restricted_or_check",
+    "UMLS / SNOMED CT": "restricted_or_check",
+}
+
+
+def _registry_rule(source: AuthoritativeSource) -> SourceRule:
+    if source.tier == 1:
+        kind: SourceKind = "guideline_authority"
+    elif source.tier == 2:
+        kind = "structured_knowledge_base"
+    elif source.tier == 3:
+        kind = "primary_literature"
+    else:
+        kind = "unknown"
+    redistribution = _REDISTRIBUTION_OVERRIDES.get(
+        source.canonical,
+        "restricted_or_check" if source.access_mode in {"licensed_api", "controlled_web"} else "unknown",
+    )
+    return SourceRule(
+        source.canonical,
+        source.tier,
+        kind,
+        source.recommendation_authority,
+        redistribution,
+        source.aliases,
+    )
+
+
+_REGISTRY_SKIP = {
+    "Meditron Guidelines Collection",
+    "UMLS / SNOMED CT",
+    "RxNorm",
+}
+
+REGISTRY_RULES: tuple[SourceRule, ...] = tuple(
+    _registry_rule(source) for source in SOURCES if source.canonical not in _REGISTRY_SKIP
+)
+
+LEGACY_RULES: tuple[SourceRule, ...] = (
     SourceRule(
         "ICRC",
         1,
@@ -138,14 +131,6 @@ RULES: tuple[SourceRule, ...] = (
         False,
         "restricted_or_check",
         ("drugbank",),
-    ),
-    SourceRule(
-        "PubMed / PMC",
-        3,
-        "primary_literature",
-        False,
-        "unknown",
-        ("pubmed", "pubmed.ncbi.nlm.nih.gov", "pmc.ncbi.nlm.nih.gov", "pubmed central"),
     ),
     SourceRule(
         "AAFP",
@@ -237,6 +222,8 @@ RULES: tuple[SourceRule, ...] = (
         ("wikidoc", "wikidoc.org"),
     ),
 )
+
+RULES: tuple[SourceRule, ...] = REGISTRY_RULES + LEGACY_RULES
 
 
 def _flatten_metadata(value: Any) -> str:
