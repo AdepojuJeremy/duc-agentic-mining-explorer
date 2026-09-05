@@ -1,0 +1,239 @@
+# External source acquisition for DUC mining.
+# Paths are resolved relative to this config file. Raw snapshots remain git-ignored.
+raw_root: ../data/raw
+manifest_path: ../data/raw/manifests/source_manifest.jsonl
+
+http:
+  timeout_seconds: 90
+  max_retries: 4
+  user_agent: DUC-Agentic-Mining/0.1 research-source-acquisition
+
+sources:
+  # High-coverage discovery seed. Public Hugging Face dataset; HF_TOKEN is optional.
+  meditron:
+    enabled: true
+    kind: meditron
+    output: epfl-llm-guidelines/open_guidelines.jsonl
+    url: https://huggingface.co/datasets/epfl-llm/guidelines/resolve/main/open_guidelines.jsonl?download=true
+
+  # Licensed Tier-1 NICE guidance. The key is read only from the environment.
+  nice:
+    enabled: true
+    kind: nice
+    output: primary/nice/nice_guidance.jsonl
+    canonical_source: NICE
+    endpoint: https://api.nice.org.uk/services/guidance/index
+    api_key_env: NICE_API_KEY
+    credential_required: true
+    max_records: 12000
+    max_pages: 12000
+    rate_limit_per_second: 2
+
+  # WHO official publication API. The normalized records preserve official URLs/dates.
+  who:
+    enabled: true
+    kind: who
+    output: primary/who/who_publications.jsonl
+    canonical_source: WHO
+    endpoint: https://www.who.int/api/hubs/publications
+    max_records: 5000
+    max_pages: 100
+    rate_limit_per_second: 2
+    follow_documents: false
+
+  # CDC Content Services: search current public resources and retrieve syndicated content.
+  cdc:
+    enabled: true
+    kind: cdc
+    output: primary/cdc/cdc_guidance.jsonl
+    canonical_source: CDC
+    endpoint: https://tools.cdc.gov/api/v2/resources/media
+    queries:
+      - guideline
+      - clinical guidance
+      - recommendation
+      - screening
+      - vaccination
+      - treatment
+    max_records: 5000
+    max_pages: 200
+    rate_limit_per_second: 3
+
+  # PubMed practice/guideline records via NCBI E-utilities. NCBI_API_KEY is optional
+  # but recommended; set NCBI_EMAIL as well for registered/reproducible use.
+  pubmed:
+    enabled: true
+    kind: ncbi
+    output: literature/pubmed_guidelines.jsonl
+    canonical_source: PubMed / PMC
+    db: pubmed
+    api_key_env: NCBI_API_KEY
+    credential_required: false
+    email_env: NCBI_EMAIL
+    queries:
+      - '("Practice Guideline"[Publication Type] OR "Guideline"[Publication Type])'
+      - '("Systematic Review"[Publication Type] AND (clinical OR treatment OR diagnosis))'
+    max_records: 6000
+    rate_limit_per_second: 3
+
+  # PMC gives fuller article text where available.
+  pmc:
+    enabled: true
+    kind: ncbi
+    output: literature/pmc_guidelines.jsonl
+    canonical_source: PubMed / PMC
+    db: pmc
+    api_key_env: NCBI_API_KEY
+    credential_required: false
+    email_env: NCBI_EMAIL
+    queries:
+      - 'clinical practice guideline'
+      - 'evidence based guideline'
+    max_records: 4000
+    rate_limit_per_second: 3
+
+  # FDA labeling/safety evidence. OPENFDA_API_KEY is optional at low volume and
+  # strongly recommended for a large sync.
+  openfda:
+    enabled: true
+    kind: openfda
+    output: regulatory/fda/drug_labels.jsonl
+    canonical_source: FDA
+    endpoint: https://api.fda.gov/drug/label.json
+    api_key_env: OPENFDA_API_KEY
+    credential_required: false
+    queries:
+      - _exists_:warnings
+      - _exists_:boxed_warning
+      - _exists_:drug_interactions
+      - _exists_:contraindications
+    max_records: 5000
+    rate_limit_per_second: 3
+
+  # Controlled official-document jobs. Add specific current guideline URLs here.
+  # HTML and PDF are supported. These jobs do not crawl arbitrary links.
+  uspstf:
+    enabled: false
+    kind: official_urls
+    output: primary/uspstf/uspstf_guidance.jsonl
+    canonical_source: USPSTF
+    official_urls: []
+
+  idsa:
+    enabled: false
+    kind: official_urls
+    output: primary/idsa/idsa_guidance.jsonl
+    canonical_source: IDSA
+    official_urls: []
+
+  ontario_health:
+    enabled: false
+    kind: official_urls
+    output: primary/ontario_health/ontario_health_guidance.jsonl
+    canonical_source: Ontario Health / Cancer Care Ontario
+    official_urls: []
+
+  acr:
+    enabled: false
+    kind: official_urls
+    output: primary/acr/acr_guidance.jsonl
+    canonical_source: ACR
+    official_urls: []
+
+  acc_aha:
+    enabled: false
+    kind: official_urls
+    output: primary/acc_aha/acc_aha_guidance.jsonl
+    canonical_source: ACC / AHA
+    official_urls: []
+
+  asco:
+    enabled: false
+    kind: official_urls
+    output: primary/asco/asco_guidance.jsonl
+    canonical_source: ASCO
+    official_urls: []
+
+  acog:
+    enabled: false
+    kind: official_urls
+    output: primary/acog/acog_guidance.jsonl
+    canonical_source: ACOG
+    official_urls: []
+
+  aap:
+    enabled: false
+    kind: official_urls
+    output: primary/aap/aap_guidance.jsonl
+    canonical_source: AAP
+    official_urls: []
+
+  kdigo:
+    enabled: false
+    kind: official_urls
+    output: primary/kdigo/kdigo_guidance.jsonl
+    canonical_source: KDIGO
+    official_urls: []
+
+  gina:
+    enabled: false
+    kind: official_urls
+    output: primary/gina/gina_guidance.jsonl
+    canonical_source: GINA
+    official_urls: []
+
+  gold:
+    enabled: false
+    kind: official_urls
+    output: primary/gold/gold_guidance.jsonl
+    canonical_source: GOLD
+    official_urls: []
+
+  acep:
+    enabled: false
+    kind: official_urls
+    output: primary/acep/acep_guidance.jsonl
+    canonical_source: ACEP
+    official_urls: []
+
+  resuscitation:
+    enabled: false
+    kind: official_urls
+    output: primary/resuscitation/resuscitation_guidance.jsonl
+    canonical_source: Resuscitation Council UK / ILCOR
+    official_urls: []
+
+  mhra:
+    enabled: false
+    kind: official_urls
+    output: regulatory/mhra/mhra_safety.jsonl
+    canonical_source: MHRA
+    official_urls: []
+
+  ema:
+    enabled: false
+    kind: official_urls
+    output: regulatory/ema/ema_safety.jsonl
+    canonical_source: EMA
+    official_urls: []
+
+  ecdc:
+    enabled: false
+    kind: official_urls
+    output: primary/ecdc/ecdc_guidance.jsonl
+    canonical_source: ECDC
+    official_urls: []
+
+  ukhsa:
+    enabled: false
+    kind: official_urls
+    output: primary/ukhsa/ukhsa_guidance.jsonl
+    canonical_source: UKHSA
+    official_urls: []
+
+  africa_cdc:
+    enabled: false
+    kind: official_urls
+    output: primary/africa_cdc/africa_cdc_guidance.jsonl
+    canonical_source: Africa CDC
+    official_urls: []
