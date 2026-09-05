@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from hashlib import sha256
 from typing import Any, Literal
 
@@ -12,7 +12,7 @@ ConfidenceDirection = Literal["increase", "decrease", "maintain", "case_dependen
 
 
 def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def stable_id(prefix: str, *parts: str) -> str:
@@ -46,7 +46,7 @@ class Candidate(BaseModel):
     created_at: str = Field(default_factory=utc_now)
 
     @model_validator(mode="after")
-    def distinct_sources(self) -> "Candidate":
+    def distinct_sources(self) -> Candidate:
         if self.baseline_source_id == self.modifier_source_id:
             raise ValueError("baseline_source_id and modifier_source_id must be different")
         return self
@@ -73,7 +73,7 @@ class CandidateValidation(BaseModel):
     concerns: list[str]
 
     @model_validator(mode="after")
-    def promotion_matches_gates(self) -> "CandidateValidation":
+    def promotion_matches_gates(self) -> CandidateValidation:
         gates = [
             self.same_decision,
             self.source_supported,
@@ -106,7 +106,7 @@ class VignetteProposal(BaseModel):
     model_config = ConfigDict(extra="forbid")
     candidate_uid: str
     constructible: bool
-    unconstructible_reason: str | None = None
+    unconstructible_reason: str | None
     clinical_question: str
     stage_1_context: str
     stage_2_update: str
