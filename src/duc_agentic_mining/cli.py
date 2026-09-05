@@ -14,6 +14,7 @@ from .corpus import build_index
 from .derived_metrics import enrich_metrics_file, record_human_review
 from .nice_public import annotate_nice_status, apply_nice_public_fallback
 from .pipeline import AgenticMiningPipeline
+from .specialty_overrides import apply_specialty_catalogue_overrides
 
 app = typer.Typer(no_args_is_help=True, help="DUC comprehensive agentic source-mining explorer")
 sources_app = typer.Typer(no_args_is_help=True, help="Acquire and inspect external clinical sources.")
@@ -28,12 +29,12 @@ def _load_catalogues_for_source_config(config: Path):
     ]
     existing = [path for path in catalogue_paths if path.exists()]
     if not existing:
-        return load_catalogue_config(config)
+        return apply_specialty_catalogue_overrides(load_catalogue_config(config))
     merged = load_catalogue_config(existing[0])
     for path in existing[1:]:
         extra = load_catalogue_config(path)
         merged.catalogues.update(extra.catalogues)
-    return merged
+    return apply_specialty_catalogue_overrides(merged)
 
 
 @app.command()
