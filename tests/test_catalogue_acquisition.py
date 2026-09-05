@@ -112,6 +112,37 @@ def test_catalogue_crawler_reports_blocked_source_without_bypass(monkeypatch, tm
     assert job.output.exists()
 
 
+def test_catalogue_stops_after_consecutive_network_errors(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(catalogue._RobotsCache, "allowed", lambda self, url: True)
+
+    def timeout(url, settings):
+        raise TimeoutError("test timeout")
+
+    monkeypatch.setattr(catalogue, "_request", timeout)
+    job = CatalogueJobConfig(
+        canonical_source="Flaky Authority",
+        output=tmp_path / "flaky.jsonl",
+        seed_urls=[f"https://flaky.example/{idx}" for idx in range(10)],
+        allowed_hosts=["flaky.example"],
+        max_pages=10,
+        max_records=10,
+        rate_limit_per_second=1000,
+        request_timeout_seconds=1,
+        request_max_retries=1,
+        max_consecutive_fetch_errors=3,
+    )
+    cfg = CatalogueAcquisitionConfig(
+        raw_root=tmp_path,
+        manifest_path=tmp_path / "manifest.jsonl",
+        catalogues={},
+    )
+    result = sync_catalogue_job("flaky", job, cfg)
+    assert result["status"] == "network_error"
+    assert result["pages_visited"] == 3
+    assert result["fetch_errors"] == 3
+    assert result["stopped_after_consecutive_errors"] is True
+
+
 def test_status_exposes_catalogue_policy(tmp_path: Path):
     cfg = CatalogueAcquisitionConfig(
         raw_root=tmp_path,

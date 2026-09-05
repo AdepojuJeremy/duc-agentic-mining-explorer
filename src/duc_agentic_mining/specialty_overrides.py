@@ -9,25 +9,28 @@ def apply_specialty_catalogue_overrides(
     """Apply source-specific fixes for catalogues that need non-generic discovery."""
     acr = cfg.catalogues.get("acr")
     if acr is not None:
-        # The public ACR /list endpoint currently rejects automated fetches, while
-        # individual TopicNarrativePdf endpoints remain publicly retrievable.
-        # Enumerating the documented topic-id endpoint preserves official-source
-        # retrieval without bypassing access controls.
+        # The acsearch /list endpoint rejects urllib-based acquisition in some
+        # environments. Use the public ACR AC Portal host instead, which serves
+        # the same official TopicNarrativePdf documents.
         acr.seed_urls = [
-            f"https://acsearch.acr.org/list/TopicNarrativePdf?topicId={topic_id}"
-            for topic_id in range(1, 321)
+            f"https://gravitas.acr.org/ACPortal/TopicNarrativePdf?topicId={topic_id}"
+            for topic_id in range(1, 401)
         ]
-        acr.allowed_hosts = ["acsearch.acr.org"]
+        acr.allowed_hosts = ["gravitas.acr.org"]
         acr.crawl_patterns = []
         acr.record_patterns = [r"TopicNarrativePdf\?topicId="]
         acr.required_text_patterns = [
             r"ACR|American College of Radiology|Appropriateness Criteria"
         ]
         acr.max_depth = 0
-        acr.max_pages = 320
+        acr.max_pages = 400
         acr.max_records = 300
         acr.rate_limit_per_second = 1.0
         acr.allow_pdfs = True
+        acr.request_timeout_seconds = 20.0
+        acr.request_max_retries = 1
+        acr.max_consecutive_fetch_errors = 5
+        acr.progress_every = 25
 
     ismp = cfg.catalogues.get("ismp")
     if ismp is not None:
