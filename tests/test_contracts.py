@@ -1,6 +1,5 @@
 from pathlib import Path
 
-from duc_agentic_mining.config import CorpusConfig
 from duc_agentic_mining.contracts import build_construction_contract
 from duc_agentic_mining.corpus import CorpusStore
 from duc_agentic_mining.models import Candidate, CandidateValidation, Gate, SourceRecord
