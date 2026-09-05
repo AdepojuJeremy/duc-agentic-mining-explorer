@@ -5,8 +5,28 @@ import json
 from .config import GenerationConfig
 from .corpus import CorpusStore
 from .llm import OpenAIRoleClient
-from .models import Candidate, CandidateValidation, VignetteProposal
+from .models import Candidate, CandidateValidation, SourceProvenance, VignetteProposal
 from .prompts import GENERATOR_SYSTEM
+from .source_policy import classify_source
+
+
+def _provenance(record) -> SourceProvenance:
+    policy = classify_source(record)
+    return SourceProvenance(
+        source_id=record.source_id,
+        canonical_organization=policy.canonical_organization,
+        authority_tier=policy.authority_tier,
+        source_kind=policy.source_kind,
+        recommendation_authority=policy.recommendation_authority,
+        redistribution_status=policy.redistribution_status,
+        source_status=policy.source_status,
+        freshness_verified=policy.freshness_verified,
+        seed_collection=policy.seed_collection,
+        title=record.title,
+        source=record.source,
+        url=record.url,
+        date=record.date,
+    )
 
 
 async def generate_vignette(
@@ -44,7 +64,9 @@ async def generate_vignette(
     assert isinstance(value, VignetteProposal)
     value.candidate_uid = candidate.candidate_uid
     value.draft_number = draft_number
+    value.decision_domain = validation.normalized_domain
     value.evidence_arm = validation.normalized_arm
     value.expected_update = validation.normalized_update
     value.source_ids = [candidate.baseline_source_id, candidate.modifier_source_id]
+    value.source_provenance = [_provenance(baseline), _provenance(modifier)]
     return value
