@@ -63,4 +63,7 @@ def build_construction_contract(
         affected_decision_components=validation.affected_decision_components,
         allowed_scenario_premises=validation.allowed_scenario_premises,
         source_provenance=[source_provenance(baseline), source_provenance(modifier)],
+        # Stable rather than wall-clock generated so equality/resume checks do not
+        # rewrite an otherwise identical locked contract every exploration wave.
+        created_at=candidate.created_at,
     )
