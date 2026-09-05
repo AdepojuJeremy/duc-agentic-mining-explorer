@@ -48,6 +48,8 @@ class Candidate(BaseModel):
     decision_question: str
     baseline_source_id: str
     modifier_source_id: str
+    baseline_evidence_span: str
+    modifier_evidence_span: str
     relationship_summary: str
     proposed_arm: Arm
     expected_update: UpdateClass
@@ -82,6 +84,8 @@ class CandidateValidation(BaseModel):
     normalized_domain: DecisionDomain
     normalized_arm: Arm
     normalized_update: UpdateClass
+    affected_decision_components: list[str]
+    allowed_scenario_premises: list[str]
     concerns: list[str]
 
     @model_validator(mode="after")
@@ -97,22 +101,9 @@ class CandidateValidation(BaseModel):
         ]
         if self.promote and not all(g.passed for g in gates):
             raise ValueError("promote=true requires all validation gates to pass")
+        if self.promote and not self.affected_decision_components:
+            raise ValueError("promoted routes require affected_decision_components")
         return self
-
-
-class ScenarioPremise(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    premise_id: str
-    stage: Literal["stage_1", "stage_2"]
-    text: str
-    status: Literal["source_grounded", "constructed_requires_review"]
-
-
-class ClaimSourceMapEntry(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    claim: str
-    source_ids: list[str]
-    support: Literal["direct", "inference", "scenario_premise"]
 
 
 class SourceProvenance(BaseModel):
@@ -139,9 +130,42 @@ class SourceProvenance(BaseModel):
     date: str | None
 
 
+class ConstructionContract(BaseModel):
+    contract_uid: str
+    candidate_uid: str
+    decision_domain: DecisionDomain
+    decision_question: str
+    baseline_source_id: str
+    modifier_source_id: str
+    baseline_evidence_span: str
+    modifier_evidence_span: str
+    evidence_arm: Arm
+    expected_update: UpdateClass
+    affected_decision_components: list[str]
+    allowed_scenario_premises: list[str]
+    source_provenance: list[SourceProvenance]
+    created_at: str = Field(default_factory=utc_now)
+
+
+class ScenarioPremise(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    premise_id: str
+    stage: Literal["stage_1", "stage_2"]
+    text: str
+    status: Literal["source_grounded", "constructed_requires_review"]
+
+
+class ClaimSourceMapEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    claim: str
+    source_ids: list[str]
+    support: Literal["direct", "inference", "scenario_premise"]
+
+
 class VignetteProposal(BaseModel):
     model_config = ConfigDict(extra="forbid")
     candidate_uid: str
+    contract_uid: str
     constructible: bool
     unconstructible_reason: str | None
     decision_domain: DecisionDomain
@@ -176,6 +200,7 @@ class ProposalReview(BaseModel):
     same_decision_preserved: GroundingGate
     stage_separation: GroundingGate
     no_unsupported_patient_facts: GroundingGate
+    scenario_premises_authorized: GroundingGate
     no_answer_cues: GroundingGate
     nonduplicative_stage2: GroundingGate
     recommendation_grounding: GroundingGate
@@ -218,6 +243,7 @@ class RunMetrics(BaseModel):
     candidates_unique: int = 0
     validations_completed: int = 0
     candidates_promoted: int = 0
+    construction_contracts: int = 0
     proposals_generated: int = 0
     proposal_reviews_completed: int = 0
     proposals_passed: int = 0
