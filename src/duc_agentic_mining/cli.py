@@ -22,8 +22,18 @@ console = Console()
 
 
 def _load_catalogues_for_source_config(config: Path):
-    sibling = config.parent / "specialty_catalogues.yaml"
-    return load_catalogue_config(sibling if sibling.exists() else config)
+    catalogue_paths = [
+        config.parent / "specialty_catalogues.yaml",
+        config.parent / "specialty_catalogues_extra.yaml",
+    ]
+    existing = [path for path in catalogue_paths if path.exists()]
+    if not existing:
+        return load_catalogue_config(config)
+    merged = load_catalogue_config(existing[0])
+    for path in existing[1:]:
+        extra = load_catalogue_config(path)
+        merged.catalogues.update(extra.catalogues)
+    return merged
 
 
 @app.command()
