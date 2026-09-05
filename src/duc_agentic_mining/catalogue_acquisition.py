@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import sys
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -43,6 +44,10 @@ class CatalogueJobConfig(BaseModel):
     rate_limit_per_second: float = Field(default=1.0, gt=0)
     allow_pdfs: bool = False
     respect_robots_txt: bool = True
+    request_timeout_seconds: float | None = Field(default=None, gt=0)
+    request_max_retries: int | None = Field(default=None, ge=1, le=10)
+    max_consecutive_fetch_errors: int = Field(default=0, ge=0)
+    progress_every: int = Field(default=0, ge=0)
 
 
 class CatalogueAcquisitionConfig(BaseModel):
@@ -211,7 +216,23 @@ def _should_crawl(job: CatalogueJobConfig, url: str) -> bool:
     if job.deny_patterns and _matches_any(job.deny_patterns, url):
         return False
     path = urlparse(url).path.lower()
-    if any(path.endswith(ext) for ext in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".css", ".js", ".zip", ".ppt", ".pptx", ".doc", ".docx")):
+    if any(
+        path.endswith(ext)
+        for ext in (
+            ".jpg",
+            ".jpeg",
+            ".png",
+            ".gif",
+            ".webp",
+            ".css",
+            ".js",
+            ".zip",
+            ".ppt",
+            ".pptx",
+            ".doc",
+            ".docx",
+        )
+    ):
         return False
     if path.endswith(".pdf") and not job.allow_pdfs:
         return False
@@ -249,7 +270,13 @@ def _extract_pdf(payload: bytes) -> str:
     return "\n".join((page.extract_text() or "") for page in reader.pages).strip()
 
 
-def _record(job: CatalogueJobConfig, url: str, title: str, text: str, headers: dict[str, str]) -> dict[str, Any]:
+def _record(
+    job: CatalogueJobConfig,
+    url: str,
+    title: str,
+    text: str,
+    headers: dict[str, str],
+) -> dict[str, Any]:
     digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:20]
     last_modified = headers.get("last-modified")
     return {
@@ -297,14 +324,48 @@ def _append_manifest(cfg: CatalogueAcquisitionConfig, entry: dict[str, Any]) -> 
         handle.write(json.dumps({"timestamp": utc_now(), **entry}, ensure_ascii=False) + "\n")
 
 
-def sync_catalogue_job(name: str, job: CatalogueJobConfig, cfg: CatalogueAcquisitionConfig) -> dict[str, Any]:
+def _job_http_settings(job: CatalogueJobConfig, cfg: CatalogueAcquisitionConfig) -> HTTPSettings:
+    updates: dict[str, Any] = {}
+    if job.request_timeout_seconds is not None:
+        updates["timeout_seconds"] = job.request_timeout_seconds
+    if job.request_max_retries is not None:
+        updates["max_retries"] = job.request_max_retries
+    return cfg.http.model_copy(update=updates) if updates else cfg.http
+
+
+def _emit_progress(
+    name: str,
+    job: CatalogueJobConfig,
+    *,
+    visited: int,
+    records: int,
+    fetch_errors: int,
+    blocked: int,
+) -> None:
+    if job.progress_every and visited % job.progress_every == 0:
+        print(
+            f"[sources:{name}] checked={visited}/{job.max_pages} "
+            f"records={records} fetch_errors={fetch_errors} blocked={blocked}",
+            file=sys.stderr,
+            flush=True,
+        )
+
+
+def sync_catalogue_job(
+    name: str,
+    job: CatalogueJobConfig,
+    cfg: CatalogueAcquisitionConfig,
+) -> dict[str, Any]:
     queue: list[tuple[str, int]] = [(url, 0) for url in job.seed_urls]
     visited: set[str] = set()
     records: list[dict[str, Any]] = []
-    robots = _RobotsCache(cfg.http)
+    request_settings = _job_http_settings(job, cfg)
+    robots = _RobotsCache(request_settings)
     blocked = 0
     robots_skipped = 0
     fetch_errors = 0
+    consecutive_fetch_errors = 0
+    stopped_after_consecutive_errors = False
 
     while queue and len(visited) < job.max_pages and len(records) < job.max_records:
         url, depth = queue.pop(0)
@@ -313,14 +374,53 @@ def sync_catalogue_job(name: str, job: CatalogueJobConfig, cfg: CatalogueAcquisi
         visited.add(url)
         if job.respect_robots_txt and not robots.allowed(url):
             robots_skipped += 1
+            _emit_progress(
+                name,
+                job,
+                visited=len(visited),
+                records=len(records),
+                fetch_errors=fetch_errors,
+                blocked=blocked,
+            )
             continue
         try:
-            fetched = _request(url, cfg.http)
+            fetched = _request(url, request_settings)
+            consecutive_fetch_errors = 0
         except BlockedBySource:
             blocked += 1
+            consecutive_fetch_errors = 0
+            _emit_progress(
+                name,
+                job,
+                visited=len(visited),
+                records=len(records),
+                fetch_errors=fetch_errors,
+                blocked=blocked,
+            )
             continue
         except Exception:
             fetch_errors += 1
+            consecutive_fetch_errors += 1
+            _emit_progress(
+                name,
+                job,
+                visited=len(visited),
+                records=len(records),
+                fetch_errors=fetch_errors,
+                blocked=blocked,
+            )
+            if (
+                job.max_consecutive_fetch_errors
+                and consecutive_fetch_errors >= job.max_consecutive_fetch_errors
+            ):
+                stopped_after_consecutive_errors = True
+                print(
+                    f"[sources:{name}] stopping after {consecutive_fetch_errors} "
+                    "consecutive fetch errors",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                break
             continue
 
         final = fetched.final_url
@@ -333,6 +433,14 @@ def sync_catalogue_job(name: str, job: CatalogueJobConfig, cfg: CatalogueAcquisi
                 text = _extract_pdf(fetched.payload)
             except Exception:
                 fetch_errors += 1
+                _emit_progress(
+                    name,
+                    job,
+                    visited=len(visited),
+                    records=len(records),
+                    fetch_errors=fetch_errors,
+                    blocked=blocked,
+                )
                 continue
             title = final.rsplit("/", 1)[-1]
             links: list[str] = []
@@ -347,11 +455,21 @@ def sync_catalogue_job(name: str, job: CatalogueJobConfig, cfg: CatalogueAcquisi
                 if link not in visited and _should_crawl(job, link):
                     queue.append((link, depth + 1))
 
+        _emit_progress(
+            name,
+            job,
+            visited=len(visited),
+            records=len(records),
+            fetch_errors=fetch_errors,
+            blocked=blocked,
+        )
         time.sleep(1.0 / max(job.rate_limit_per_second, 0.1))
 
     _write_jsonl(job.output, records)
     status = "synced"
-    if not records and blocked:
+    if not records and stopped_after_consecutive_errors:
+        status = "network_error"
+    elif not records and blocked:
         status = "blocked_by_source"
     elif not records and robots_skipped and not fetch_errors:
         status = "robots_disallowed"
@@ -364,6 +482,7 @@ def sync_catalogue_job(name: str, job: CatalogueJobConfig, cfg: CatalogueAcquisi
         "blocked_pages": blocked,
         "robots_skipped": robots_skipped,
         "fetch_errors": fetch_errors,
+        "stopped_after_consecutive_errors": stopped_after_consecutive_errors,
         "output": str(job.output),
     }
     _append_manifest(
@@ -396,6 +515,10 @@ def catalogue_status(cfg: CatalogueAcquisitionConfig) -> dict[str, Any]:
             "allowed_hosts": job.allowed_hosts,
             "allow_pdfs": job.allow_pdfs,
             "respect_robots_txt": job.respect_robots_txt,
+            "request_timeout_seconds": job.request_timeout_seconds,
+            "request_max_retries": job.request_max_retries,
+            "max_consecutive_fetch_errors": job.max_consecutive_fetch_errors,
+            "progress_every": job.progress_every,
         }
         for name, job in cfg.catalogues.items()
     }
